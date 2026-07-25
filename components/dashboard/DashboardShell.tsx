@@ -1,11 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useSceneState } from "@/lib/state/SceneStateProvider";
 import { TrustGraph } from "./TrustGraph";
 import { MonologuePanel } from "./MonologuePanel";
 import { StatusSidebar } from "./StatusSidebar";
 import { AudioPlayer } from "./AudioPlayer";
 import { GodMicButton } from "./GodMicButton";
+import { ShowControls } from "./ShowControls";
 
 const CLOCK_TICK_MS = 1000;
 
@@ -40,8 +42,21 @@ function CornerBracket({ className }: { className: string }) {
   );
 }
 
+const STATUS_DOT_CLASS: Record<string, string> = {
+  open: "bg-emerald-500",
+  connecting: "bg-amber-500",
+  closed: "bg-red-600",
+};
+
+const STATUS_LABEL: Record<string, string> = {
+  open: "LIVE",
+  connecting: "CONNECTING",
+  closed: "OFFLINE",
+};
+
 export function DashboardShell() {
   const clock = useClock();
+  const { connectionStatus } = useSceneState();
 
   return (
     <div className="relative flex h-screen flex-col bg-black text-zinc-100">
@@ -63,9 +78,11 @@ export function DashboardShell() {
 
       <header className="relative z-20 flex items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4 py-2">
         <div className="flex items-center gap-2">
-          <span className="h-2 w-2 animate-pulse rounded-full bg-red-600" />
+          <span
+            className={`h-2 w-2 animate-pulse rounded-full ${STATUS_DOT_CLASS[connectionStatus]}`}
+          />
           <h1 className="font-mono text-sm uppercase tracking-[0.2em] text-zinc-400">
-            Director&rsquo;s Dashboard — Live
+            Director&rsquo;s Dashboard — {STATUS_LABEL[connectionStatus]}
           </h1>
         </div>
         <div className="flex items-center gap-3 font-mono text-xs text-zinc-600">
@@ -74,6 +91,8 @@ export function DashboardShell() {
           <span>CAM 01</span>
         </div>
       </header>
+
+      <ShowControls />
 
       <div className="relative z-20 grid flex-1 grid-cols-[220px_1fr_320px] overflow-hidden">
         <aside className="overflow-y-auto border-r border-zinc-800">

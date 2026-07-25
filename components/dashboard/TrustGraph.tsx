@@ -37,7 +37,10 @@ export function TrustGraph() {
     });
   }, [state.transcript]);
 
-  const characters = [...state.activeParticipants, ...state.offScreenParticipants];
+  const characters =
+    state.characters.length > 0
+      ? state.characters.map((character) => character.id)
+      : [...state.activeParticipants, ...state.offScreenParticipants];
 
   const radius = 120;
   const center = 150;
@@ -52,12 +55,14 @@ export function TrustGraph() {
   });
 
   const edges = Object.entries(state.trustMatrix)
-    .map(([key, value]) => {
-      const [fromId, toId] = key.split("-");
-      const from = positions.find((p) => p.characterId === fromId);
-      const to = positions.find((p) => p.characterId === toId);
+    .flatMap(([fromId, targets]) =>
+      Object.entries(targets).map(([toId, value]) => ({ fromId, toId, value }))
+    )
+    .map((edge) => {
+      const from = positions.find((p) => p.characterId === edge.fromId);
+      const to = positions.find((p) => p.characterId === edge.toId);
       if (!from || !to) return null;
-      return { fromId, toId, from, to, value };
+      return { ...edge, from, to };
     })
     .filter((edge): edge is NonNullable<typeof edge> => edge !== null);
 

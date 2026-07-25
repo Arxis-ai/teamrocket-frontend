@@ -5,7 +5,11 @@ import { Badge } from "@/components/ui/badge";
 
 export function StatusSidebar() {
   const { state } = useSceneState();
-  const allCharacters = [...state.activeParticipants, ...state.offScreenParticipants];
+  const roster =
+    state.characters.length > 0
+      ? state.characters.map((character) => character.id)
+      : [...state.activeParticipants, ...state.offScreenParticipants];
+  const nameById = new Map(state.characters.map((character) => [character.id, character.name]));
 
   return (
     <div className="flex flex-col gap-2 p-4">
@@ -13,10 +17,10 @@ export function StatusSidebar() {
         Contestant Status
       </h2>
       <div className="flex flex-col gap-2">
-        {allCharacters.length === 0 && (
+        {roster.length === 0 && (
           <p className="text-sm text-zinc-500">Waiting for feed…</p>
         )}
-        {allCharacters.map((characterId) => {
+        {roster.map((characterId) => {
           const isActive = state.activeParticipants.includes(characterId);
           return (
             <div
@@ -24,7 +28,7 @@ export function StatusSidebar() {
               className="flex items-center justify-between rounded border border-zinc-800 bg-zinc-950/60 px-3 py-2"
             >
               <span className="font-mono text-sm text-zinc-200 capitalize">
-                {characterId}
+                {nameById.get(characterId) ?? characterId}
               </span>
               <Badge
                 variant={isActive ? "default" : "outline"}

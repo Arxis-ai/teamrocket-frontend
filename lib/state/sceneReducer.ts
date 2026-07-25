@@ -1,11 +1,12 @@
-import type { DialogueTurnMessage, AudioChunkMessage, ServerMessage } from "../ws/types";
+import type { CharacterInfo, DialogueTurnMessage, ServerMessage } from "../ws/types";
 
 export type SceneState = {
+  characters: CharacterInfo[];
   activeParticipants: string[];
   offScreenParticipants: string[];
-  trustMatrix: Record<string, number>;
+  trustMatrix: Record<string, Record<string, number>>;
   transcript: DialogueTurnMessage[];
-  audioQueue: AudioChunkMessage[];
+  lastError: string | null;
   godMic: {
     active: boolean;
     target: string | null;
@@ -14,11 +15,12 @@ export type SceneState = {
 };
 
 export const initialSceneState: SceneState = {
+  characters: [],
   activeParticipants: [],
   offScreenParticipants: [],
   trustMatrix: {},
   transcript: [],
-  audioQueue: [],
+  lastError: null,
   godMic: {
     active: false,
     target: null,
@@ -30,6 +32,13 @@ const MAX_TRANSCRIPT_LENGTH = 50;
 
 export function sceneReducer(state: SceneState, message: ServerMessage): SceneState {
   switch (message.type) {
+    case "show_state":
+      return {
+        ...state,
+        characters: message.characters,
+        trustMatrix: message.trust_matrix,
+      };
+
     case "scene_change":
       return {
         ...state,
@@ -41,12 +50,6 @@ export function sceneReducer(state: SceneState, message: ServerMessage): SceneSt
       return {
         ...state,
         transcript: [...state.transcript, message].slice(-MAX_TRANSCRIPT_LENGTH),
-      };
-
-    case "audio_chunk":
-      return {
-        ...state,
-        audioQueue: [...state.audioQueue, message],
       };
 
     case "trust_snapshot":
@@ -65,6 +68,17 @@ export function sceneReducer(state: SceneState, message: ServerMessage): SceneSt
         },
       };
 
+    case "error":
+      return {
+        ...state,
+        lastError: message.message,
+      };
+
+    // audio_chunk / audio_end / pong are consumed directly by subscribers
+    // (AudioPlayer, ping keepalive) that don't need to live in shared state.
+    case "audio_chunk":
+    case "audio_end":
+    case "pong":
     default:
       return state;
   }

@@ -2,30 +2,49 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useSceneState } from "@/lib/state/SceneStateProvider";
-import type { AudioChunkMessage } from "@/lib/ws/types";
 
 const BAR_COUNT = 12;
 const MIN_BAR_HEIGHT_PX = 4;
 const MAX_BAR_HEIGHT_PX = 24;
 
-function base64ToArrayBuffer(base64: string): ArrayBuffer {
+function base64ToUint8Array(base64: string): Uint8Array {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {
     bytes[i] = binary.charCodeAt(i);
   }
-  return bytes.buffer;
+  return bytes;
 }
 
+function concatUint8Arrays(chunks: Uint8Array[]): ArrayBuffer {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const combined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return combined.buffer;
+}
+
+type QueuedTurn = {
+  characterId: string;
+  buffer: ArrayBuffer;
+};
+
+// The backend streams MP3 bytes at arbitrary byte boundaries per
+// audio_chunk — an individual chunk is not a self-contained decodable MP3
+// file. Bytes must be accumulated until audio_end (one contestant line)
+// before a single decodeAudioData call, per 02_BACKEND_HANDOFF.md.
 export function AudioPlayer() {
-  const { state } = useSceneState();
-  const [nowPlaying, setNowPlaying] = useState<AudioChunkMessage | null>(null);
+  const { onMessage } = useSceneState();
+  const [nowPlaying, setNowPlaying] = useState<string | null>(null);
   const barRefs = useRef<(HTMLSpanElement | null)[]>([]);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
-  const queueRef = useRef<AudioChunkMessage[]>([]);
+  const pendingChunksRef = useRef<Uint8Array[]>([]);
+  const queueRef = useRef<QueuedTurn[]>([]);
   const isPlayingRef = useRef(false);
-  const processedLengthRef = useRef(0);
   const animationFrameRef = useRef<number | null>(null);
 
   const getAudioContext = (): { audioContext: AudioContext; analyser: AnalyserNode } => {
@@ -66,27 +85,21 @@ export function AudioPlayer() {
   };
 
   const playNext = async () => {
-    const chunk = queueRef.current.shift();
-    if (!chunk) {
+    const turn = queueRef.current.shift();
+    if (!turn) {
       isPlayingRef.current = false;
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
       resetBars();
-      return;
-    }
-
-    if (!chunk.chunk) {
-      // No real audio bytes (e.g. the in-browser mock) — skip to the next chunk.
-      void playNext();
+      setNowPlaying(null);
       return;
     }
 
     isPlayingRef.current = true;
-    setNowPlaying(chunk);
+    setNowPlaying(turn.characterId);
 
     try {
       const { audioContext, analyser } = getAudioContext();
-      const arrayBuffer = base64ToArrayBuffer(chunk.chunk);
-      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      const audioBuffer = await audioContext.decodeAudioData(turn.buffer);
       const source = audioContext.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(analyser);
@@ -96,23 +109,33 @@ export function AudioPlayer() {
       source.start();
       drawVisualizer();
     } catch (error) {
-      console.error("[AudioPlayer] failed to decode/play audio chunk", error);
+      console.error("[AudioPlayer] failed to decode/play turn audio", error);
       void playNext();
     }
   };
 
   useEffect(() => {
-    const newChunks = state.audioQueue.slice(processedLengthRef.current);
-    processedLengthRef.current = state.audioQueue.length;
-    if (newChunks.length === 0) return;
-
-    queueRef.current.push(...newChunks);
-    if (!isPlayingRef.current) {
-      void playNext();
-    }
+    const unsubscribe = onMessage((message) => {
+      if (message.type === "audio_chunk") {
+        if (message.chunk) {
+          pendingChunksRef.current.push(base64ToUint8Array(message.chunk));
+        }
+      } else if (message.type === "audio_end") {
+        const chunks = pendingChunksRef.current;
+        pendingChunksRef.current = [];
+        if (chunks.length > 0) {
+          queueRef.current.push({
+            characterId: message.character_id,
+            buffer: concatUint8Arrays(chunks),
+          });
+          if (!isPlayingRef.current) void playNext();
+        }
+      }
+    });
+    return unsubscribe;
     // playNext reads queueRef/isPlayingRef directly, not a reactive dependency
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.audioQueue]);
+  }, [onMessage]);
 
   useEffect(() => {
     const audioContext = audioContextRef.current;
@@ -137,9 +160,7 @@ export function AudioPlayer() {
         ))}
       </div>
       <span className="font-mono text-xs text-zinc-400">
-        {nowPlaying
-          ? `Playing: ${nowPlaying.character_id} (chunk #${nowPlaying.sequence})`
-          : "No audio yet"}
+        {nowPlaying ? `Playing: ${nowPlaying}` : "No audio yet"}
       </span>
     </div>
   );

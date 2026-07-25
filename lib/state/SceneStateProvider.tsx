@@ -1,49 +1,60 @@
 "use client";
 
-import { createContext, useContext, useEffect, useReducer, useRef } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useState } from "react";
 import type { ReactNode } from "react";
 import { createSocket } from "../ws/createSocket";
-import type { ClientMessage, SocketHandle } from "../ws/types";
+import type { ClientMessage, ConnectionStatus, ServerMessage } from "../ws/types";
 import { initialSceneState, sceneReducer } from "./sceneReducer";
 import type { SceneState } from "./sceneReducer";
 
 type SceneStateContextValue = {
   state: SceneState;
+  connectionStatus: ConnectionStatus;
   send: (message: ClientMessage) => void;
-  sendAudio: (chunk: ArrayBuffer) => void;
+  onMessage: (handler: (message: ServerMessage) => void) => () => void;
 };
 
 const SceneStateContext = createContext<SceneStateContextValue | null>(null);
 
 export function SceneStateProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(sceneReducer, initialSceneState);
-  const socketRef = useRef<SocketHandle | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("connecting");
+  // Lazy useState initializer, not a ref: it runs once during this
+  // component's own render, before children mount — so the socket already
+  // exists by the time a child's effect (e.g. AudioPlayer) subscribes via
+  // onMessage. A ref would do the same timing but reading ref.current
+  // during render is disallowed by the react-hooks/refs lint rule.
+  const [socket] = useState(() => createSocket());
 
   useEffect(() => {
-    const socket = createSocket();
-    socketRef.current = socket;
-    const unsubscribe = socket.onMessage(dispatch);
+    const unsubscribeMessages = socket.onMessage(dispatch);
+    const unsubscribeStatus = socket.onStatusChange(setConnectionStatus);
 
     return () => {
-      unsubscribe();
+      unsubscribeMessages();
+      unsubscribeStatus();
       socket.close();
-      socketRef.current = null;
     };
-  }, []);
+  }, [socket]);
 
-  const send = (message: ClientMessage) => {
-    socketRef.current?.send(message);
-  };
-
-  const sendAudio = (chunk: ArrayBuffer) => {
-    socketRef.current?.sendAudio(chunk);
-  };
-
-  return (
-    <SceneStateContext.Provider value={{ state, send, sendAudio }}>
-      {children}
-    </SceneStateContext.Provider>
+  const send = useCallback(
+    (message: ClientMessage) => {
+      socket.send(message);
+    },
+    [socket]
   );
+
+  const onMessage = useCallback(
+    (handler: (message: ServerMessage) => void) => socket.onMessage(handler),
+    [socket]
+  );
+
+  const value = useMemo(
+    () => ({ state, connectionStatus, send, onMessage }),
+    [state, connectionStatus, send, onMessage]
+  );
+
+  return <SceneStateContext.Provider value={value}>{children}</SceneStateContext.Provider>;
 }
 
 export function useSceneState(): SceneStateContextValue {
