@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import { useSceneState } from "@/lib/state/SceneStateProvider";
 import { Button } from "@/components/ui/button";
+import { getDeepgramToken } from "@/lib/deepgram/tokenCache";
 
 // Raw PCM buffer size per audio-processing callback. WebM/Opus via
 // MediaRecorder was tried first and doesn't reliably reach Deepgram's
@@ -15,13 +16,10 @@ const DEEPGRAM_MODEL = process.env.NEXT_PUBLIC_DEEPGRAM_MODEL ?? "nova-3";
 // The backend does not proxy microphone audio over /ws/show (see
 // 02_BACKEND_HANDOFF.md "Not implemented yet" — backend-proxy Deepgram
 // streaming). Instead the frontend mints a short-lived Deepgram key via
-// POST /api/deepgram/token and streams straight to Deepgram from the
-// browser, then forwards only the final transcript text to the backend
-// as godmic_transcript_final.
-function apiUrl(path: string): string {
-  const base = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
-  return `${base.replace(/\/$/, "")}${path}`;
-}
+// POST /api/deepgram/token (cached in lib/deepgram/tokenCache.ts so a
+// rapid double-press doesn't mint a fresh key every time) and streams
+// straight to Deepgram from the browser, then forwards only the final
+// transcript text to the backend as godmic_transcript_final.
 
 function floatTo16BitPCM(input: Float32Array): ArrayBuffer {
   const output = new Int16Array(input.length);
@@ -39,25 +37,41 @@ type CaptureHandle = {
   stream: MediaStream;
 };
 
-type DeepgramResult = {
+type DeepgramMessage = {
   type?: string;
   is_final?: boolean;
   channel?: { alternatives?: { transcript?: string }[] };
+  // Present on Deepgram's error-shaped messages (exact shape isn't
+  // consistently documented) — surfaced so a real auth/config error
+  // doesn't look identical to "nothing happened."
+  description?: string;
+  message?: string;
 };
 
 export function GodMicButton() {
   const { state, send } = useSceneState();
   const [selectedTarget, setSelectedTarget] = useState<string | null>(null);
+  const [pendingTarget, setPendingTarget] = useState<string | null>(null);
   const [micError, setMicError] = useState<string | null>(null);
   const [interimTranscript, setInterimTranscript] = useState("");
   const captureRef = useRef<CaptureHandle | null>(null);
   const deepgramSocketRef = useRef<WebSocket | null>(null);
   const finalPiecesRef = useRef<string[]>([]);
   const targetRef = useRef<string | null>(null);
+  // Guards a release that happens while still awaiting the token/mic
+  // permission (a very quick press-release) — capture must stop the
+  // moment it actually starts, instead of recording indefinitely.
+  const releaseRequestedRef = useRef(false);
+  // Distinguishes an intentional stopDeepgram() close from the socket
+  // dying unexpectedly mid-recording (auth issue, network drop) — both
+  // fire the same "close" event, so this is set right before the
+  // intentional close and checked inside the close handler.
+  const intentionalCloseRef = useRef(false);
 
-  // God Mic only ever targets a character currently in the active scene
-  // (01_build_plan.md Section 2.5) — off-screen characters are never offered.
-  const activeCharacters = state.activeParticipants;
+  // God Mic can only target a character in the batch you're currently
+  // focused on (listening to) — the backend rejects whispers into any
+  // other conversation, even an active one you're just not tuned into.
+  const activeCharacters = state.focusedBatchId ? (state.batches[state.focusedBatchId] ?? []) : [];
 
   const stopCapture = () => {
     const capture = captureRef.current;
@@ -75,21 +89,30 @@ export function GodMicButton() {
     setInterimTranscript("");
     const target = targetRef.current;
     targetRef.current = null;
+    console.log(`[GodMicButton] finalizing whisper — target="${target}" text="${text}"`);
     if (text && target) {
+      console.log("[GodMicButton] sending godmic_transcript_final to the backend");
       send({ type: "godmic_transcript_final", target_character: target, text });
+    } else if (target) {
+      console.warn("[GodMicButton] nothing was transcribed — not sending anything to the backend");
+      setMicError("No speech detected — try holding the button longer and speaking clearly.");
     }
   };
 
   const stopDeepgram = () => {
     const socket = deepgramSocketRef.current;
     deepgramSocketRef.current = null;
+    intentionalCloseRef.current = true;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
+      console.warn("[GodMicButton] stopDeepgram called but socket wasn't open — finalizing with whatever was captured");
       finalizeAndSend();
       return;
     }
     // Give Deepgram a moment to flush the trailing final result after we
     // signal end-of-stream, then finalize whatever we've accumulated.
+    console.log("[GodMicButton] sending CloseStream, waiting for Deepgram to flush the final result");
     const finalizeTimer = setTimeout(() => {
+      console.warn("[GodMicButton] Deepgram didn't close within 1s of CloseStream — finalizing anyway");
       socket.close();
       finalizeAndSend();
     }, 1000);
@@ -103,7 +126,8 @@ export function GodMicButton() {
     );
     try {
       socket.send(JSON.stringify({ type: "CloseStream" }));
-    } catch {
+    } catch (error) {
+      console.error("[GodMicButton] failed to send CloseStream", error);
       clearTimeout(finalizeTimer);
       socket.close();
       finalizeAndSend();
@@ -111,20 +135,22 @@ export function GodMicButton() {
   };
 
   const handlePress = async (characterId: string) => {
-    if (captureRef.current) return; // already recording, ignore re-press
+    if (captureRef.current || pendingTarget) return; // already recording/loading, ignore re-press
     setMicError(null);
     setInterimTranscript("");
     finalPiecesRef.current = [];
+    releaseRequestedRef.current = false;
+    intentionalCloseRef.current = false;
+    setPendingTarget(characterId);
 
     let key: string;
     try {
-      const response = await fetch(apiUrl("/api/deepgram/token"), { method: "POST" });
-      if (!response.ok) throw new Error(`token request failed: ${response.status}`);
-      const data = (await response.json()) as { key: string };
-      key = data.key;
+      key = await getDeepgramToken();
+      console.log("[GodMicButton] Deepgram token acquired");
     } catch (error) {
       console.error("[GodMicButton] failed to mint Deepgram token", error);
       setMicError("Could not reach the backend for a Deepgram token.");
+      setPendingTarget(null);
       return;
     }
 
@@ -134,6 +160,7 @@ export function GodMicButton() {
     } catch (error) {
       console.error("[GodMicButton] microphone access failed", error);
       setMicError("Microphone permission denied or unavailable.");
+      setPendingTarget(null);
       return;
     }
 
@@ -142,26 +169,57 @@ export function GodMicButton() {
     const dgUrl =
       `wss://api.deepgram.com/v1/listen?model=${DEEPGRAM_MODEL}` +
       `&encoding=linear16&sample_rate=${sampleRate}&channels=1&interim_results=true&punctuate=true`;
+    console.log("[GodMicButton] connecting to Deepgram", dgUrl);
     const deepgramSocket = new WebSocket(dgUrl, ["token", key]);
+    deepgramSocket.addEventListener("open", () => {
+      console.log("[GodMicButton] Deepgram connection open, selected subprotocol:", deepgramSocket.protocol);
+    });
     deepgramSocket.addEventListener("message", (event) => {
+      let parsed: DeepgramMessage;
       try {
-        const parsed = JSON.parse(event.data) as DeepgramResult;
-        if (parsed.type !== "Results") return;
-        const transcript = parsed.channel?.alternatives?.[0]?.transcript ?? "";
-        if (!transcript) return;
-        if (parsed.is_final) {
-          finalPiecesRef.current.push(transcript);
-          setInterimTranscript("");
-        } else {
-          setInterimTranscript(transcript);
-        }
+        parsed = JSON.parse(event.data) as DeepgramMessage;
       } catch (error) {
         console.error("[GodMicButton] failed to parse Deepgram message", error, event.data);
+        return;
+      }
+
+      if (parsed.type === "Metadata") {
+        console.log("[GodMicButton] Deepgram Metadata (stream wrapping up)", parsed);
+        return;
+      }
+      if (parsed.type !== "Results") {
+        // Anything other than Results/Metadata is unexpected — could be a
+        // real Deepgram-side error (bad model/params/auth) that would
+        // otherwise look identical to "the button just didn't do anything."
+        console.warn("[GodMicButton] unexpected Deepgram message, surfacing it instead of silently dropping it", parsed);
+        setMicError(`Deepgram: ${parsed.description ?? parsed.message ?? parsed.type ?? "unexpected response"}`);
+        return;
+      }
+
+      const transcript = parsed.channel?.alternatives?.[0]?.transcript ?? "";
+      if (parsed.is_final) {
+        console.log(`[GodMicButton] is_final result: "${transcript}"`);
+      }
+      if (!transcript) return;
+      if (parsed.is_final) {
+        finalPiecesRef.current.push(transcript);
+        console.log("[GodMicButton] accumulated so far:", JSON.stringify(finalPiecesRef.current.join(" ")));
+        setInterimTranscript("");
+      } else {
+        setInterimTranscript(transcript);
       }
     });
     deepgramSocket.addEventListener("error", (event) => {
       console.error("[GodMicButton] Deepgram socket error", event);
       setMicError("Deepgram connection error.");
+    });
+    deepgramSocket.addEventListener("close", (event) => {
+      if (intentionalCloseRef.current) return;
+      // Closed on its own while we were still supposed to be recording —
+      // e.g. an auth problem or the connection dropping. Without this,
+      // the UI would keep showing "recording" while nothing is happening.
+      console.error("[GodMicButton] Deepgram closed unexpectedly", { code: event.code, reason: event.reason });
+      setMicError(`Deepgram connection closed unexpectedly (${event.code}). Release and try again.`);
     });
     deepgramSocketRef.current = deepgramSocket;
 
@@ -185,10 +243,21 @@ export function GodMicButton() {
 
     captureRef.current = { audioContext, source, processor, stream };
     targetRef.current = characterId;
+    setPendingTarget(null);
+
+    if (releaseRequestedRef.current) {
+      // User already released while we were fetching the token/mic
+      // permission — stop immediately instead of recording indefinitely.
+      stopCapture();
+      stopDeepgram();
+      setSelectedTarget(null);
+      return;
+    }
     setSelectedTarget(characterId);
   };
 
   const handleRelease = () => {
+    releaseRequestedRef.current = true;
     if (selectedTarget) {
       stopCapture();
       stopDeepgram();
@@ -205,20 +274,30 @@ export function GodMicButton() {
         {activeCharacters.length === 0 && (
           <p className="text-sm text-zinc-500">No active characters to target.</p>
         )}
-        {activeCharacters.map((characterId) => (
-          <Button
-            key={characterId}
-            variant={selectedTarget === characterId ? "default" : "outline"}
-            className={
-              selectedTarget === characterId ? "bg-amber-600 hover:bg-amber-600" : ""
-            }
-            onMouseDown={() => void handlePress(characterId)}
-            onMouseUp={handleRelease}
-            onMouseLeave={() => selectedTarget === characterId && handleRelease()}
-          >
-            Whisper to {characterId}
-          </Button>
-        ))}
+        {activeCharacters.map((characterId) => {
+          const isPending = pendingTarget === characterId;
+          const isRecording = selectedTarget === characterId;
+          return (
+            <Button
+              key={characterId}
+              variant={isRecording ? "default" : "outline"}
+              className={isRecording ? "bg-amber-600 hover:bg-amber-600" : ""}
+              disabled={isPending}
+              onMouseDown={() => void handlePress(characterId)}
+              onMouseUp={handleRelease}
+              onMouseLeave={() => isRecording && handleRelease()}
+            >
+              {isPending ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                  Connecting…
+                </span>
+              ) : (
+                `Whisper to ${characterId}`
+              )}
+            </Button>
+          );
+        })}
       </div>
       {micError && <p className="font-mono text-xs text-red-400">{micError}</p>}
       {selectedTarget && interimTranscript && (

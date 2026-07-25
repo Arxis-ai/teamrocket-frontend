@@ -12,6 +12,10 @@ type SceneStateContextValue = {
   connectionStatus: ConnectionStatus;
   send: (message: ClientMessage) => void;
   onMessage: (handler: (message: ServerMessage) => void) => () => void;
+  // Called by AudioPlayer the moment a turn's line actually starts playing
+  // (or immediately, if that turn has no audio) — moves the oldest queued
+  // turn from pendingTurns into the visible transcript. See sceneReducer.ts.
+  revealNextTurn: () => void;
 };
 
 const SceneStateContext = createContext<SceneStateContextValue | null>(null);
@@ -49,9 +53,13 @@ export function SceneStateProvider({ children }: { children: ReactNode }) {
     [socket]
   );
 
+  const revealNextTurn = useCallback(() => {
+    dispatch({ type: "reveal_next_turn" });
+  }, [dispatch]);
+
   const value = useMemo(
-    () => ({ state, connectionStatus, send, onMessage }),
-    [state, connectionStatus, send, onMessage]
+    () => ({ state, connectionStatus, send, onMessage, revealNextTurn }),
+    [state, connectionStatus, send, onMessage, revealNextTurn]
   );
 
   return <SceneStateContext.Provider value={value}>{children}</SceneStateContext.Provider>;

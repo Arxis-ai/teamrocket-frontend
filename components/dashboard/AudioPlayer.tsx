@@ -30,6 +30,10 @@ function concatUint8Arrays(chunks: Uint8Array[]): ArrayBuffer {
 type QueuedTurn = {
   characterId: string;
   buffer: ArrayBuffer;
+  // Reveals this turn's dialogue_turn (see sceneReducer's pendingTurns) —
+  // called the moment this line actually starts playing, so captions never
+  // race ahead of the voice saying them (see SceneStateProvider.revealNextTurn).
+  reveal: () => void;
 };
 
 // The backend streams MP3 bytes at arbitrary byte boundaries per
@@ -37,7 +41,7 @@ type QueuedTurn = {
 // file. Bytes must be accumulated until audio_end (one contestant line)
 // before a single decodeAudioData call, per 02_BACKEND_HANDOFF.md.
 export function AudioPlayer() {
-  const { onMessage } = useSceneState();
+  const { state, onMessage, revealNextTurn } = useSceneState();
   const [nowPlaying, setNowPlaying] = useState<string | null>(null);
   const barRefs = useRef<(HTMLSpanElement | null)[]>([]);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -46,6 +50,16 @@ export function AudioPlayer() {
   const queueRef = useRef<QueuedTurn[]>([]);
   const isPlayingRef = useRef(false);
   const animationFrameRef = useRef<number | null>(null);
+  // The node actually producing sound right now, if any — needed so a
+  // focus switch can stop it immediately instead of letting it finish.
+  const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  // Tracked in a ref (not read from `state` inside the message handler) so
+  // the onMessage subscription below doesn't need to resubscribe every time
+  // any part of scene state changes — only focus actually matters here.
+  const focusedBatchIdRef = useRef(state.focusedBatchId);
+  useEffect(() => {
+    focusedBatchIdRef.current = state.focusedBatchId;
+  }, [state.focusedBatchId]);
 
   const getAudioContext = (): { audioContext: AudioContext; analyser: AnalyserNode } => {
     if (!audioContextRef.current || !analyserRef.current) {
@@ -88,6 +102,7 @@ export function AudioPlayer() {
     const turn = queueRef.current.shift();
     if (!turn) {
       isPlayingRef.current = false;
+      currentSourceRef.current = null;
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
       resetBars();
       setNowPlaying(null);
@@ -103,39 +118,85 @@ export function AudioPlayer() {
       const source = audioContext.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(analyser);
+      currentSourceRef.current = source;
       source.onended = () => {
+        if (currentSourceRef.current === source) currentSourceRef.current = null;
         void playNext();
       };
       source.start();
+      turn.reveal();
       drawVisualizer();
     } catch (error) {
       console.error("[AudioPlayer] failed to decode/play turn audio", error);
+      // Decoding failed (bad bytes, unsupported format) — the turn still
+      // needs to be revealed, just without audio, so captions/monologue
+      // don't get stuck waiting on a line that will never play.
+      turn.reveal();
       void playNext();
+    }
+  };
+
+  // Stops whatever's currently playing and drops anything queued/half
+  // -accumulated — used for a real user-initiated focus switch (not a
+  // batches_snapshot update from the focused conversation naturally
+  // reshuffling its own id, which must NOT cut audio since it's still
+  // "the same conversation") and for stop/start (show_status), where the
+  // whole session is clearing out and nothing queued is relevant anymore.
+  const stopAndClearQueue = (reason: string) => {
+    console.log(`[AudioPlayer] ${reason} — clearing queue and stopping in-progress audio`);
+    queueRef.current = [];
+    pendingChunksRef.current = [];
+    const source = currentSourceRef.current;
+    if (source) {
+      try {
+        source.stop();
+      } catch {
+        // Already stopped/ended — nothing to do.
+      }
     }
   };
 
   useEffect(() => {
     const unsubscribe = onMessage((message) => {
-      if (message.type === "audio_chunk") {
+      if (message.type === "focus_changed") {
+        stopAndClearQueue("focus switched");
+      } else if (message.type === "show_status") {
+        stopAndClearQueue(message.running ? "show (re)started" : "show stopped");
+      } else if (message.type === "audio_chunk") {
+        // The backend only ever synthesizes audio for the focused batch,
+        // but a focus switch mid-stream can still leave a straggler chunk
+        // in flight for a batch we've since unfocused — drop it rather
+        // than accumulating audio for a conversation nobody asked to hear.
+        if (message.batch_id !== focusedBatchIdRef.current) return;
         if (message.chunk) {
           pendingChunksRef.current.push(base64ToUint8Array(message.chunk));
         }
       } else if (message.type === "audio_end") {
+        if (message.batch_id !== focusedBatchIdRef.current) {
+          pendingChunksRef.current = [];
+          revealNextTurn();
+          return;
+        }
         const chunks = pendingChunksRef.current;
         pendingChunksRef.current = [];
         if (chunks.length > 0) {
           queueRef.current.push({
             characterId: message.character_id,
             buffer: concatUint8Arrays(chunks),
+            reveal: revealNextTurn,
           });
           if (!isPlayingRef.current) void playNext();
+        } else {
+          // No audio for this turn at all — nothing to pace against, so
+          // reveal immediately instead of leaving it stuck in pendingTurns.
+          revealNextTurn();
         }
       }
     });
     return unsubscribe;
     // playNext reads queueRef/isPlayingRef directly, not a reactive dependency
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onMessage]);
+  }, [onMessage, revealNextTurn]);
 
   useEffect(() => {
     const audioContext = audioContextRef.current;

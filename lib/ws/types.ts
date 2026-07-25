@@ -1,6 +1,7 @@
-// Message contract — source of truth: backend/docs/02_BACKEND_HANDOFF.md
-// (the implemented contract, which supersedes the pre-build-plan draft in
-// 01_final_build_plan.md Section 3).
+// Message contract — source of truth: teamrocket-backend/app/routers/show_ws.py
+// and app/services/show_engine.py (the implemented contract). The show runs
+// as multiple concurrent conversation "batches" (see app/services/director.py)
+// rather than one flat scene — see BatchesSnapshotMessage.
 
 export type TrustDelta = {
   target: string;
@@ -21,14 +22,24 @@ export type ShowStateMessage = {
   trust_matrix: Record<string, Record<string, number>>;
 };
 
-export type SceneChangeMessage = {
-  type: "scene_change";
+export type BatchInfo = {
+  id: string;
   participants: string[];
+};
+
+// Replaces the old singular scene_change message — one message fully
+// describing current batch groupings, sent on start/reset and whenever any
+// batch's membership changes, instead of the frontend merging per-batch deltas.
+export type BatchesSnapshotMessage = {
+  type: "batches_snapshot";
+  batches: BatchInfo[];
   off_screen: string[];
+  focused_batch_id: string | null;
 };
 
 export type DialogueTurnMessage = {
   type: "dialogue_turn";
+  batch_id: string;
   character_id: string;
   public_dialogue: string;
   addressed_to: string | null;
@@ -42,6 +53,7 @@ export type DialogueTurnMessage = {
 
 export type AudioChunkMessage = {
   type: "audio_chunk";
+  batch_id: string;
   character_id: string;
   chunk: string; // base64-encoded MP3 bytes, arbitrary byte-boundary
   sequence: number;
@@ -49,6 +61,7 @@ export type AudioChunkMessage = {
 
 export type AudioEndMessage = {
   type: "audio_end";
+  batch_id: string;
   character_id: string;
   sequence: number;
 };
@@ -64,6 +77,11 @@ export type GodMicTranscriptMessage = {
   final: boolean;
 };
 
+export type FocusChangedMessage = {
+  type: "focus_changed";
+  batch_id: string;
+};
+
 export type PongMessage = {
   type: "pong";
 };
@@ -71,18 +89,29 @@ export type PongMessage = {
 export type ErrorMessage = {
   type: "error";
   message: string;
+  // Present when the error came from a specific batch's turn/audio
+  // generation (see show_ws.py's resilient retry wrapper) — absent for
+  // connection-level protocol errors (bad focus_batch id, unknown message type).
+  batch_id?: string;
+};
+
+export type ShowStatusMessage = {
+  type: "show_status";
+  running: boolean;
 };
 
 export type ServerMessage =
   | ShowStateMessage
-  | SceneChangeMessage
+  | BatchesSnapshotMessage
   | DialogueTurnMessage
   | AudioChunkMessage
   | AudioEndMessage
   | TrustSnapshotMessage
   | GodMicTranscriptMessage
+  | FocusChangedMessage
   | PongMessage
-  | ErrorMessage;
+  | ErrorMessage
+  | ShowStatusMessage;
 
 export type StartMessage = { type: "start" };
 export type StopMessage = { type: "stop" };
@@ -95,12 +124,18 @@ export type GodMicTranscriptFinalMessage = {
   text: string;
 };
 
+export type FocusBatchMessage = {
+  type: "focus_batch";
+  batch_id: string;
+};
+
 export type ClientMessage =
   | StartMessage
   | StopMessage
   | ResetMessage
   | PingMessage
-  | GodMicTranscriptFinalMessage;
+  | GodMicTranscriptFinalMessage
+  | FocusBatchMessage;
 
 export type ConnectionStatus = "connecting" | "open" | "closed";
 

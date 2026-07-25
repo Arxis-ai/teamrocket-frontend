@@ -2,11 +2,22 @@ import type { CharacterInfo, DialogueTurnMessage, ServerMessage } from "../ws/ty
 
 export type SceneState = {
   characters: CharacterInfo[];
-  activeParticipants: string[];
-  offScreenParticipants: string[];
+  // batch_id -> participant character ids. Several conversations run
+  // concurrently; focusedBatchId is the one the viewer is "tuned in" to
+  // (the only one AudioPlayer plays audio for).
+  batches: Record<string, string[]>;
+  offScreen: string[];
+  focusedBatchId: string | null;
   trustMatrix: Record<string, Record<string, number>>;
+  // Audio-paced reveal (see revealNextTurn in SceneStateProvider): a turn
+  // only moves from pendingTurns into transcript once AudioPlayer decides
+  // its line has actually started playing (or immediately if it has no
+  // audio) — this is what MonologuePanel/DialoguePanel render, so captions
+  // never race ahead of the voice that's supposed to be saying them.
   transcript: DialogueTurnMessage[];
+  pendingTurns: DialogueTurnMessage[];
   lastError: string | null;
+  showRunning: boolean;
   godMic: {
     active: boolean;
     target: string | null;
@@ -16,11 +27,14 @@ export type SceneState = {
 
 export const initialSceneState: SceneState = {
   characters: [],
-  activeParticipants: [],
-  offScreenParticipants: [],
+  batches: {},
+  offScreen: [],
+  focusedBatchId: null,
   trustMatrix: {},
   transcript: [],
+  pendingTurns: [],
   lastError: null,
+  showRunning: false,
   godMic: {
     active: false,
     target: null,
@@ -30,32 +44,51 @@ export const initialSceneState: SceneState = {
 
 const MAX_TRANSCRIPT_LENGTH = 50;
 
-export function sceneReducer(state: SceneState, message: ServerMessage): SceneState {
-  switch (message.type) {
+export type RevealNextTurnAction = { type: "reveal_next_turn" };
+export type SceneAction = ServerMessage | RevealNextTurnAction;
+
+export function sceneReducer(state: SceneState, action: SceneAction): SceneState {
+  switch (action.type) {
     case "show_state":
       return {
         ...state,
-        characters: message.characters,
-        trustMatrix: message.trust_matrix,
+        characters: action.characters,
+        trustMatrix: action.trust_matrix,
       };
 
-    case "scene_change":
+    case "batches_snapshot": {
+      const batches: Record<string, string[]> = {};
+      for (const batch of action.batches) {
+        batches[batch.id] = batch.participants;
+      }
       return {
         ...state,
-        activeParticipants: message.participants,
-        offScreenParticipants: message.off_screen,
+        batches,
+        offScreen: action.off_screen,
+        focusedBatchId: action.focused_batch_id,
       };
+    }
 
     case "dialogue_turn":
       return {
         ...state,
-        transcript: [...state.transcript, message].slice(-MAX_TRANSCRIPT_LENGTH),
+        pendingTurns: [...state.pendingTurns, action],
       };
+
+    case "reveal_next_turn": {
+      const [next, ...rest] = state.pendingTurns;
+      if (!next) return state;
+      return {
+        ...state,
+        pendingTurns: rest,
+        transcript: [...state.transcript, next].slice(-MAX_TRANSCRIPT_LENGTH),
+      };
+    }
 
     case "trust_snapshot":
       return {
         ...state,
-        trustMatrix: message.trust_matrix,
+        trustMatrix: action.trust_matrix,
       };
 
     case "godmic_transcript":
@@ -63,16 +96,42 @@ export function sceneReducer(state: SceneState, message: ServerMessage): SceneSt
         ...state,
         godMic: {
           ...state.godMic,
-          active: !message.final,
-          transcript: message.text,
+          active: !action.final,
+          transcript: action.text,
         },
+      };
+
+    case "focus_changed":
+      return {
+        ...state,
+        focusedBatchId: action.batch_id,
       };
 
     case "error":
       return {
         ...state,
-        lastError: message.message,
+        lastError: action.batch_id ? `[${action.batch_id}] ${action.message}` : action.message,
       };
+
+    case "show_status":
+      if (action.running) {
+        // Fresh show_state/batches_snapshot arrive immediately after this
+        // (see show_ws.py) — just clear the per-run fields those messages
+        // don't touch, so old dialogue/thoughts don't linger into a new run.
+        return {
+          ...state,
+          showRunning: true,
+          transcript: [],
+          pendingTurns: [],
+          lastError: null,
+          godMic: { active: false, target: null, transcript: "" },
+        };
+      }
+      // Stopped: the backend fully clears its own session too (see
+      // ShowEngine.stop) and nothing else is coming until the next start —
+      // return to exactly how the dashboard looked before anything ever
+      // connected, not a frozen snapshot of the last run.
+      return { ...initialSceneState, showRunning: false };
 
     // audio_chunk / audio_end / pong are consumed directly by subscribers
     // (AudioPlayer, ping keepalive) that don't need to live in shared state.

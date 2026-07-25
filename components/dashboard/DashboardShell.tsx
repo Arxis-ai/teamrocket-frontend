@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import { useSceneState } from "@/lib/state/SceneStateProvider";
 import { TrustGraph } from "./TrustGraph";
 import { MonologuePanel } from "./MonologuePanel";
+import { DialoguePanel } from "./DialoguePanel";
+import { ConversationGroups } from "./ConversationGroups";
 import { StatusSidebar } from "./StatusSidebar";
 import { AudioPlayer } from "./AudioPlayer";
 import { GodMicButton } from "./GodMicButton";
@@ -94,9 +96,12 @@ export function DashboardShell() {
 
       <ShowControls />
 
-      <div className="relative z-20 grid flex-1 grid-cols-[220px_1fr_320px] overflow-hidden">
-        <aside className="overflow-y-auto border-r border-zinc-800">
-          <StatusSidebar />
+      <div className="relative z-20 grid flex-1 grid-cols-[240px_1fr_320px] overflow-hidden">
+        <aside className="flex flex-col overflow-y-auto border-r border-zinc-800">
+          <ConversationGroups />
+          <div className="border-t border-zinc-800">
+            <StatusSidebar />
+          </div>
         </aside>
 
         <main className="relative overflow-hidden">
@@ -107,8 +112,13 @@ export function DashboardShell() {
           <TrustGraph />
         </main>
 
-        <aside className="overflow-hidden border-l border-zinc-800">
-          <MonologuePanel />
+        <aside className="flex flex-col overflow-hidden border-l border-zinc-800">
+          <div className="flex-1 overflow-hidden">
+            <DialoguePanel />
+          </div>
+          <div className="flex-1 overflow-hidden border-t border-zinc-800">
+            <MonologuePanel />
+          </div>
         </aside>
       </div>
 

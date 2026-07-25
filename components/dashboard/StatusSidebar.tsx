@@ -1,14 +1,27 @@
 "use client";
 
 import { useSceneState } from "@/lib/state/SceneStateProvider";
+import { characterTier } from "@/lib/state/characterTier";
 import { Badge } from "@/components/ui/badge";
+
+const TIER_BADGE_CLASS: Record<string, string> = {
+  focused: "bg-sky-600 text-white",
+  active: "bg-emerald-700/70 text-emerald-50",
+  off: "text-zinc-500",
+};
+
+const TIER_LABEL: Record<string, string> = {
+  focused: "LISTENING",
+  active: "IN CONVERSATION",
+  off: "OFF SCREEN",
+};
 
 export function StatusSidebar() {
   const { state } = useSceneState();
   const roster =
     state.characters.length > 0
       ? state.characters.map((character) => character.id)
-      : [...state.activeParticipants, ...state.offScreenParticipants];
+      : [...Object.values(state.batches).flat(), ...state.offScreen];
   const nameById = new Map(state.characters.map((character) => [character.id, character.name]));
 
   return (
@@ -21,7 +34,7 @@ export function StatusSidebar() {
           <p className="text-sm text-zinc-500">Waiting for feed…</p>
         )}
         {roster.map((characterId) => {
-          const isActive = state.activeParticipants.includes(characterId);
+          const tier = characterTier(characterId, state.batches, state.focusedBatchId);
           return (
             <div
               key={characterId}
@@ -31,10 +44,10 @@ export function StatusSidebar() {
                 {nameById.get(characterId) ?? characterId}
               </span>
               <Badge
-                variant={isActive ? "default" : "outline"}
-                className={isActive ? "bg-emerald-600 text-white" : "text-zinc-500"}
+                variant={tier === "off" ? "outline" : "default"}
+                className={TIER_BADGE_CLASS[tier]}
               >
-                {isActive ? "ON SCREEN" : "OFF SCREEN"}
+                {TIER_LABEL[tier]}
               </Badge>
             </div>
           );
