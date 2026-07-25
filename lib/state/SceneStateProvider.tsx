@@ -10,6 +10,7 @@ import type { SceneState } from "./sceneReducer";
 type SceneStateContextValue = {
   state: SceneState;
   send: (message: ClientMessage) => void;
+  sendAudio: (chunk: ArrayBuffer) => void;
 };
 
 const SceneStateContext = createContext<SceneStateContextValue | null>(null);
@@ -34,8 +35,12 @@ export function SceneStateProvider({ children }: { children: ReactNode }) {
     socketRef.current?.send(message);
   };
 
+  const sendAudio = (chunk: ArrayBuffer) => {
+    socketRef.current?.sendAudio(chunk);
+  };
+
   return (
-    <SceneStateContext.Provider value={{ state, send }}>
+    <SceneStateContext.Provider value={{ state, send, sendAudio }}>
       {children}
     </SceneStateContext.Provider>
   );

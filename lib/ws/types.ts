@@ -50,6 +50,10 @@ export type ServerMessage =
 export type GodMicStartMessage = {
   type: "godmic_start";
   target_character: string;
+  // Extends the base 01_build_plan.md §3.4 contract: the backend-proxy
+  // needs this to build the correct Deepgram encoding params (raw PCM,
+  // not WebM/Opus — see GodMicButton.tsx for why).
+  sample_rate: number;
 };
 
 export type GodMicTranscriptFinalMessage = {
@@ -68,6 +72,7 @@ export type ClientMessage =
 
 export type SocketHandle = {
   send: (message: ClientMessage) => void;
+  sendAudio: (chunk: ArrayBuffer) => void;
   onMessage: (handler: (message: ServerMessage) => void) => () => void;
   close: () => void;
 };

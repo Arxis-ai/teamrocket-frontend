@@ -19,6 +19,11 @@ export function createRealSocket(url: string): SocketHandle {
         socket.send(JSON.stringify(message));
       }
     },
+    sendAudio(chunk: ArrayBuffer) {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(chunk);
+      }
+    },
     onMessage(handler) {
       handlers.add(handler);
       return () => handlers.delete(handler);

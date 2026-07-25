@@ -1,13 +1,42 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import { useSceneState } from "@/lib/state/SceneStateProvider";
+
+const FLOAT_DURATION_MS = 1200;
 
 function angleForIndex(index: number, total: number) {
   return (index / Math.max(total, 1)) * 2 * Math.PI - Math.PI / 2;
 }
 
+type FloatingNumber = {
+  id: string;
+  target: string;
+  change: number;
+};
+
 export function TrustGraph() {
   const { state } = useSceneState();
+  const [floatingNumbers, setFloatingNumbers] = useState<FloatingNumber[]>([]);
+  const processedTranscriptLengthRef = useRef(0);
+
+  useEffect(() => {
+    const newTurns = state.transcript.slice(processedTranscriptLengthRef.current);
+    processedTranscriptLengthRef.current = state.transcript.length;
+
+    newTurns.forEach((turn) => {
+      if (!turn.trust_delta) return;
+      const id = `${turn.trust_delta.target}-${Date.now()}-${Math.random()}`;
+      setFloatingNumbers((prev) => [
+        ...prev,
+        { id, target: turn.trust_delta!.target, change: turn.trust_delta!.change },
+      ]);
+      setTimeout(() => {
+        setFloatingNumbers((prev) => prev.filter((entry) => entry.id !== id));
+      }, FLOAT_DURATION_MS);
+    });
+  }, [state.transcript]);
+
   const characters = [...state.activeParticipants, ...state.offScreenParticipants];
 
   const radius = 120;
@@ -70,6 +99,25 @@ export function TrustGraph() {
                 {characterId.slice(0, 4).toUpperCase()}
               </text>
             </g>
+          );
+        })}
+        {floatingNumbers.map((entry) => {
+          const position = positions.find((p) => p.characterId === entry.target);
+          if (!position) return null;
+          return (
+            <text
+              key={entry.id}
+              x={position.x}
+              y={position.y - 26}
+              textAnchor="middle"
+              fontSize={13}
+              fontFamily="monospace"
+              fontWeight="bold"
+              fill={entry.change >= 0 ? "#34d399" : "#f87171"}
+              style={{ animation: `float-up-fade ${FLOAT_DURATION_MS}ms ease-out forwards` }}
+            >
+              {entry.change >= 0 ? `+${entry.change}` : entry.change}
+            </text>
           );
         })}
       </svg>

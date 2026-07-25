@@ -57,6 +57,9 @@ export function createMockSocket(): SocketHandle {
       // Mock has no server to relay to — godmic_start/stop are no-ops here;
       // godmic_transcript playback is scripted above instead.
     },
+    sendAudio() {
+      // No real audio pipeline in the in-browser mock.
+    },
     onMessage(handler) {
       handlers.add(handler);
       return () => handlers.delete(handler);
