@@ -18,16 +18,15 @@ export function MonologuePanel() {
             <p className="text-sm text-zinc-500">No thoughts yet…</p>
           )}
           {entries.map((entry, index) => {
-            // Every batch's thoughts always show here — dim anything that
-            // isn't the batch currently being listened to, and label which
-            // batch each entry came from, matching DialoguePanel.
-            const isFocused = entry.batch_id === state.focusedBatchId;
+            // transcript is cleared on every real focus switch (see
+            // sceneReducer's focus_changed case), so everything here always
+            // belongs to the conversation currently being listened to —
+            // batch_id is shown for reference only, never used to dim,
+            // matching DialoguePanel.
             return (
               <div
                 key={`${entry.character_id}-${index}`}
-                className={`rounded border border-rose-900/40 bg-rose-950/20 px-3 py-2 ${
-                  isFocused ? "" : "opacity-40"
-                }`}
+                className="rounded border border-rose-900/40 bg-rose-950/20 px-3 py-2"
               >
                 <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-rose-400/80">
                   <span className="flex items-center gap-1.5">

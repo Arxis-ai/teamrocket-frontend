@@ -102,9 +102,18 @@ export function sceneReducer(state: SceneState, action: SceneAction): SceneState
       };
 
     case "focus_changed":
+      // A real user-initiated switch (as opposed to batches_snapshot, which
+      // also fires on the still-watched conversation naturally reshuffling
+      // its own id) — clear out the old batch's dialogue/thoughts so the
+      // panels and graph only ever show the conversation currently being
+      // listened to, not a lingering mix from whatever was focused earlier
+      // this session. Safe to wipe pendingTurns outright here too: nothing
+      // still queued belongs to the batch we're now leaving.
       return {
         ...state,
         focusedBatchId: action.batch_id,
+        transcript: [],
+        pendingTurns: [],
       };
 
     case "error":

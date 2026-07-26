@@ -34,13 +34,20 @@ type SpeechBubble = {
 };
 
 export function TrustGraph() {
-  const { state } = useSceneState();
+  const { state, onMessage } = useSceneState();
   const [floatingNumbers, setFloatingNumbers] = useState<FloatingNumber[]>([]);
   const [speechBubbles, setSpeechBubbles] = useState<Record<string, SpeechBubble>>({});
   const processedTranscriptLengthRef = useRef(0);
   const bubbleTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   useEffect(() => {
+    // transcript is cleared to [] on a real focus switch (see sceneReducer's
+    // focus_changed case) — without this, the ref would stay stuck above
+    // the new (shorter) array's length and silently stop picking up any
+    // new turns until it grew back past the old high-water mark.
+    if (state.transcript.length < processedTranscriptLengthRef.current) {
+      processedTranscriptLengthRef.current = 0;
+    }
     const newTurns = state.transcript.slice(processedTranscriptLengthRef.current);
     processedTranscriptLengthRef.current = state.transcript.length;
 
@@ -84,6 +91,23 @@ export function TrustGraph() {
       Object.values(timers).forEach(clearTimeout);
     };
   }, []);
+
+  useEffect(() => {
+    // A real user-initiated switch (not a same-conversation reshuffle —
+    // see AudioPlayer's identical distinction) must clear stale bubbles
+    // immediately rather than waiting out whatever's left of their own
+    // independent 6s timers, which is what made a just-left batch's text
+    // appear to "stick" on the graph after switching.
+    const unsubscribe = onMessage((message) => {
+      if (message.type === "focus_changed") {
+        Object.values(bubbleTimersRef.current).forEach(clearTimeout);
+        bubbleTimersRef.current = {};
+        setSpeechBubbles({});
+        setFloatingNumbers([]);
+      }
+    });
+    return unsubscribe;
+  }, [onMessage]);
 
   const characters =
     state.characters.length > 0
