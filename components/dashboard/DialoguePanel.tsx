@@ -2,7 +2,6 @@
 
 import { useEffect, useRef } from "react";
 import { useSceneState } from "@/lib/state/SceneStateProvider";
-import { ScrollArea } from "@/components/ui/scroll-area";
 
 // Shows what's actually said out loud (public_dialogue), in sync with the
 // audio-paced transcript (see AudioPlayer.tsx / sceneReducer.ts) — the
@@ -23,47 +22,72 @@ export function DialoguePanel() {
   }, [state.transcript.length]);
 
   return (
-    <div className="flex h-full flex-col p-4">
-      <h2 className="mb-2 text-xs uppercase tracking-widest text-emerald-500/70">
-        Spoken Dialogue
-      </h2>
-      <ScrollArea className="flex-1">
-        <div className="flex flex-col gap-2 pr-2">
+    <div className="flex h-full flex-col">
+      <div className="flex shrink-0 items-center gap-2 border-b border-violet-100 px-4 py-3">
+        <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-violet-100 text-violet-600">
+          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="currentColor">
+            <path d="M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z" />
+          </svg>
+        </span>
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.15em] text-violet-500/80">
+          Spoken Dialogue
+        </h2>
+      </div>
+
+      <div className="scroll-slim flex-1 overflow-y-auto p-3">
+        <div className="flex flex-col gap-2">
           {/* Invisible anchor at the very top so useEffect can scroll here */}
           <div ref={topRef} />
           {entries.length === 0 && (
-            <p className="text-sm text-zinc-500">No dialogue yet…</p>
+            <p className="rounded-xl border border-dashed border-violet-200 px-3 py-6 text-center text-xs text-muted-foreground">
+              No dialogue yet…
+            </p>
           )}
           {entries.map((entry, index) => {
             const isCurrent = index === 0;
             return (
               <div
                 key={`${entry.character_id}-${index}`}
-                className={`rounded border px-3 py-2 transition-colors ${
+                className={`animate-enter-up relative overflow-hidden rounded-xl border px-3 py-2.5 transition-colors ${
                   isCurrent
-                    ? "border-amber-600/60 bg-amber-950/20"
-                    : "border-emerald-900/40 bg-emerald-950/10"
+                    ? "border-violet-300 bg-gradient-to-br from-violet-50 to-fuchsia-50/60 shadow-md shadow-violet-500/10"
+                    : "border-slate-200 bg-white"
                 }`}
               >
-                <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-emerald-400/80">
+                {isCurrent && (
+                  <span
+                    aria-hidden
+                    className="pointer-events-none absolute inset-y-0 -left-full w-1/2 bg-gradient-to-r from-transparent via-white/70 to-transparent"
+                    style={{ animation: "sheen 1.6s ease-out" }}
+                  />
+                )}
+                <div className="relative flex items-center justify-between gap-2">
                   <span className="flex items-center gap-1.5">
-                    <span className={`font-mono capitalize ${isCurrent ? "text-amber-300" : ""}`}>{entry.character_id}</span>
-                    <span className="rounded bg-zinc-800 px-1 py-0.5 font-mono text-zinc-500">
+                    <span
+                      className={`text-xs font-bold capitalize ${
+                        isCurrent ? "text-violet-700" : "text-slate-700"
+                      }`}
+                    >
+                      {entry.character_id}
+                    </span>
+                    <span className="rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[9px] font-medium uppercase text-slate-400">
                       {entry.batch_id}
                     </span>
                   </span>
                   {entry.addressed_to && (
-                    <span className="normal-case text-zinc-500">
-                      to <span className="capitalize">{entry.addressed_to}</span>
+                    <span className="shrink-0 text-[10px] font-medium text-slate-400">
+                      to <span className="capitalize text-violet-500">{entry.addressed_to}</span>
                     </span>
                   )}
                 </div>
-                <p className="mt-1 text-sm text-zinc-100">&ldquo;{entry.public_dialogue}&rdquo;</p>
+                <p className="relative mt-1.5 text-sm leading-relaxed text-slate-800">
+                  &ldquo;{entry.public_dialogue}&rdquo;
+                </p>
               </div>
             );
           })}
         </div>
-      </ScrollArea>
+      </div>
     </div>
   );
 }

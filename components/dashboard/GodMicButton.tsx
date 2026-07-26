@@ -2,7 +2,6 @@
 
 import { useRef, useState } from "react";
 import { useSceneState } from "@/lib/state/SceneStateProvider";
-import { Button } from "@/components/ui/button";
 import { getDeepgramToken } from "@/lib/deepgram/tokenCache";
 
 const PCM_BUFFER_SIZE = 4096;
@@ -225,28 +224,39 @@ export function GodMicButton() {
   const canSend = inputText.trim().length > 0 && selectedTarget !== null;
 
   return (
-    <div className="flex flex-col gap-2 border-t border-zinc-800 bg-zinc-950/60 p-4">
-      <h2 className="text-xs uppercase tracking-widest text-amber-500/70">God Mic</h2>
+    <div className="flex flex-col gap-2.5 px-5 py-3">
+      <div className="flex items-center gap-2">
+        <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-gradient-to-br from-violet-600 to-fuchsia-500 text-white shadow-sm shadow-violet-500/25">
+          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="currentColor">
+            <path d="M12 2a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3zm7 9a1 1 0 1 1 2 0 9 9 0 0 1-8 8.94V22a1 1 0 1 1-2 0v-2.06A9 9 0 0 1 3 11a1 1 0 1 1 2 0 7 7 0 0 0 14 0z" />
+          </svg>
+        </span>
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.15em] text-violet-500/80">
+          God Mic
+        </h2>
+        <span className="text-[11px] text-slate-400">Whisper to a contestant mid-scene</span>
+      </div>
 
       {/* Target character selector — single-click to select */}
       <div className="flex flex-wrap gap-2">
         {activeCharacters.length === 0 && (
-          <p className="text-sm text-zinc-500">No active characters to target.</p>
+          <p className="text-xs text-slate-400">No active characters to target.</p>
         )}
         {activeCharacters.map((characterId) => {
           const isSelected = selectedTarget === characterId;
           return (
-            <Button
+            <button
               key={characterId}
-              className={
+              type="button"
+              className={`max-w-[200px] truncate rounded-full px-3 py-1.5 text-xs font-semibold capitalize transition-all ${
                 isSelected
-                  ? "max-w-[200px] truncate border-amber-600 bg-amber-600 text-white hover:bg-amber-500 active:bg-amber-700"
-                  : "max-w-[200px] truncate border-zinc-700 bg-transparent text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 active:bg-zinc-700"
-              }
+                  ? "bg-gradient-to-r from-violet-600 to-fuchsia-500 text-white shadow-md shadow-violet-500/25"
+                  : "border border-slate-200 bg-white text-slate-600 hover:border-violet-300 hover:bg-violet-50 hover:text-violet-700"
+              }`}
               onClick={() => setSelectedTarget(isSelected ? null : characterId)}
             >
               {characterId}
-            </Button>
+            </button>
           );
         })}
       </div>
@@ -264,7 +274,7 @@ export function GodMicButton() {
                 ? `Whisper to ${selectedTarget}… (Enter to send)`
                 : "Select a character above, then type or dictate…"
             }
-            className="min-h-[3rem] flex-1 resize-none rounded border border-zinc-800 bg-zinc-900/60 px-3 py-2 font-mono text-xs text-zinc-100 placeholder-zinc-600 outline-none transition-colors focus:border-amber-600/60 focus:bg-zinc-900"
+            className="min-h-[3rem] flex-1 resize-none rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-800 placeholder-slate-400 shadow-sm outline-none transition-all focus:border-violet-400 focus:ring-4 focus:ring-violet-500/10"
           />
 
           {/* Mic toggle button */}
@@ -273,13 +283,18 @@ export function GodMicButton() {
             onClick={handleMicToggle}
             disabled={micPending}
             title={micActive ? "Stop recording" : "Start dictating"}
-            className={`flex h-[3rem] w-10 shrink-0 items-center justify-center rounded border transition-colors ${
+            className={`animate-halo flex h-[3rem] w-11 shrink-0 items-center justify-center rounded-xl border transition-all ${
               micActive
-                ? "border-red-600 bg-red-900/30 text-red-400 hover:bg-red-900/50"
+                ? "border-rose-300 bg-rose-50 text-rose-600 hover:bg-rose-100"
                 : micPending
-                ? "border-zinc-700 bg-zinc-800 text-zinc-500"
-                : "border-zinc-700 bg-transparent text-zinc-400 hover:border-amber-600/60 hover:text-amber-400"
+                  ? "border-slate-200 bg-slate-100 text-slate-400"
+                  : "border-slate-200 bg-white text-slate-500 shadow-sm hover:border-violet-300 hover:bg-violet-50 hover:text-violet-600"
             }`}
+            style={
+              micActive
+                ? ({ "--halo-color": "rgb(244 63 94 / 0.45)" } as React.CSSProperties)
+                : { animation: "none" }
+            }
           >
             {micPending ? (
               <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
@@ -302,10 +317,10 @@ export function GodMicButton() {
             onClick={handleSend}
             disabled={!canSend}
             title="Send whisper"
-            className={`flex h-[3rem] w-10 shrink-0 items-center justify-center rounded border transition-colors ${
+            className={`flex h-[3rem] w-11 shrink-0 items-center justify-center rounded-xl transition-all ${
               canSend
-                ? "border-amber-600 bg-amber-600/20 text-amber-400 hover:bg-amber-600/40"
-                : "border-zinc-800 bg-transparent text-zinc-700"
+                ? "bg-gradient-to-br from-violet-600 to-fuchsia-500 text-white shadow-lg shadow-violet-500/25 hover:shadow-xl hover:shadow-violet-500/35 active:translate-y-px"
+                : "border border-slate-200 bg-slate-50 text-slate-300"
             }`}
           >
             {/* Arrow-up send icon */}
@@ -319,16 +334,27 @@ export function GodMicButton() {
         {/* Status line — always present, never jumps layout */}
         <div className="min-h-[1.25rem]">
           {micError ? (
-            <p className="font-mono text-xs text-red-400">{micError}</p>
+            <p className="inline-flex items-center gap-1.5 rounded-lg bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-600">
+              {micError}
+            </p>
           ) : micActive ? (
-            <p className="font-mono text-xs text-red-400 animate-pulse">● Recording…</p>
+            <p className="inline-flex items-center gap-1.5 text-xs font-semibold text-rose-600">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-rose-500" />
+              Recording…
+            </p>
           ) : lastSent && !inputText ? (
-            <p className="font-mono text-xs text-amber-200/70">Sent: {lastSent}</p>
+            <p className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
+              <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+              Sent: {lastSent}
+            </p>
           ) : !selectedTarget ? (
-            <p className="font-mono text-xs text-zinc-600">Select a target character first</p>
+            <p className="text-xs text-slate-400">Select a target character first</p>
           ) : (
-            <p className="font-mono text-xs text-zinc-600">
-              Target: <span className="text-amber-400/80 capitalize">{selectedTarget}</span>
+            <p className="text-xs text-slate-400">
+              Target:{" "}
+              <span className="font-semibold capitalize text-violet-600">{selectedTarget}</span>
             </p>
           )}
         </div>

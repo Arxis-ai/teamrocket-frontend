@@ -10,9 +10,9 @@ const FLOAT_DURATION_MS = 1200;
 const SPEAKING_FADE_MS = 4000;
 
 const TIER_STYLE: Record<string, { fill: string; stroke: string; text: string; radius: number; bubbleBorder: string }> = {
-  focused: { fill: "#052e2b", stroke: "#10b981", text: "#d1fae5", radius: 22, bubbleBorder: "#10b981" },
-  active:  { fill: "#082032", stroke: "#0ea5e9", text: "#bae6fd", radius: 18, bubbleBorder: "#0ea5e9" },
-  off:     { fill: "#18181b", stroke: "#3f3f46", text: "#71717a", radius: 16, bubbleBorder: "#52525b" },
+  focused: { fill: "#7c3aed", stroke: "#6d28d9", text: "#ffffff", radius: 23, bubbleBorder: "#7c3aed" },
+  active:  { fill: "#ede9fe", stroke: "#a78bfa", text: "#5b21b6", radius: 19, bubbleBorder: "#a78bfa" },
+  off:     { fill: "#f8fafc", stroke: "#e2e8f0", text: "#94a3b8", radius: 16, bubbleBorder: "#e2e8f0" },
 };
 
 function angleForIndex(index: number, total: number) {
@@ -125,6 +125,10 @@ export function TrustGraph() {
               <feMergeNode in="SourceGraphic" />
             </feMerge>
           </filter>
+          {/* Soft drop shadow so nodes lift off the light card surface */}
+          <filter id="node-shadow" x="-50%" y="-50%" width="200%" height="200%">
+            <feDropShadow dx="0" dy="1.5" stdDeviation="1.5" floodColor="#4c1d95" floodOpacity="0.18" />
+          </filter>
         </defs>
 
         {edges.map((edge) => (
@@ -134,9 +138,10 @@ export function TrustGraph() {
             y1={edge.from.y}
             x2={edge.to.x}
             y2={edge.to.y}
-            stroke={edge.value >= 50 ? "#10b981" : "#ef4444"}
-            strokeWidth={1.5}
-            strokeOpacity={0.6}
+            stroke={edge.value >= 50 ? "#10b981" : "#f43f5e"}
+            strokeWidth={2}
+            strokeOpacity={0.45}
+            strokeLinecap="round"
           />
         ))}
 
@@ -154,9 +159,9 @@ export function TrustGraph() {
                   cy={y}
                   r={style.radius + 7}
                   fill="none"
-                  stroke="#f59e0b"
-                  strokeWidth={2}
-                  strokeOpacity={0.7}
+                  stroke="#d946ef"
+                  strokeWidth={2.5}
+                  strokeOpacity={0.75}
                   style={{ animation: "ping 1s cubic-bezier(0,0,0.2,1) infinite" }}
                 />
               )}
@@ -164,19 +169,20 @@ export function TrustGraph() {
                 cx={x}
                 cy={y}
                 r={style.radius}
-                fill={isSpeaking ? "#1c1007" : style.fill}
-                stroke={isSpeaking ? "#f59e0b" : style.stroke}
-                strokeWidth={isSpeaking ? 3 : tier === "off" ? 1 : 2.5}
-                filter={isSpeaking ? "url(#speaking-glow)" : undefined}
+                fill={isSpeaking ? "#d946ef" : style.fill}
+                stroke={isSpeaking ? "#a21caf" : style.stroke}
+                strokeWidth={isSpeaking ? 3 : tier === "off" ? 1.5 : 2.5}
+                filter={isSpeaking ? "url(#speaking-glow)" : "url(#node-shadow)"}
               />
               <text
                 x={x}
                 y={y + 4}
                 textAnchor="middle"
                 fontSize={10}
-                fill={isSpeaking ? "#fde68a" : style.text}
-                fontFamily="monospace"
-                fontWeight={isSpeaking ? "bold" : "normal"}
+                fill={isSpeaking ? "#ffffff" : style.text}
+                fontFamily="var(--font-jetbrains), monospace"
+                fontWeight="bold"
+                letterSpacing="0.5"
               >
                 {characterId.slice(0, 4).toUpperCase()}
               </text>
@@ -194,9 +200,9 @@ export function TrustGraph() {
               y={position.y - 26}
               textAnchor="middle"
               fontSize={13}
-              fontFamily="monospace"
+              fontFamily="var(--font-jetbrains), monospace"
               fontWeight="bold"
-              fill={entry.change >= 0 ? "#34d399" : "#f87171"}
+              fill={entry.change >= 0 ? "#059669" : "#e11d48"}
               style={{ animation: `float-up-fade ${FLOAT_DURATION_MS}ms ease-out forwards` }}
             >
               {entry.change >= 0 ? `+${entry.change}` : entry.change}

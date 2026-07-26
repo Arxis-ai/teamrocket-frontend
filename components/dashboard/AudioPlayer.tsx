@@ -223,22 +223,46 @@ export function AudioPlayer() {
   }, []);
 
   return (
-    <div className="flex items-center gap-3 border-t border-zinc-800 bg-zinc-950/60 px-4 py-3">
-      <div className="flex items-end gap-0.5 h-6">
+    <div className="flex items-center gap-3 border-b border-violet-100/80 px-5 py-2.5">
+      <span
+        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl transition-colors ${
+          nowPlaying
+            ? "bg-gradient-to-br from-violet-600 to-fuchsia-500 text-white shadow-md shadow-violet-500/25"
+            : "bg-slate-100 text-slate-400"
+        }`}
+      >
+        <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
+          <path d="M11 5 6.5 9H3a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h3.5L11 19a1 1 0 0 0 1.7-.7V5.7A1 1 0 0 0 11 5zm5.5 2.1a1 1 0 0 0-1.2 1.6 4.5 4.5 0 0 1 0 6.6 1 1 0 0 0 1.2 1.6 6.5 6.5 0 0 0 0-9.8z" />
+        </svg>
+      </span>
+
+      <div className="flex h-7 items-end gap-[3px]">
         {Array.from({ length: BAR_COUNT }).map((_, index) => (
           <span
             key={index}
             ref={(el) => {
               barRefs.current[index] = el;
             }}
-            className="w-1 rounded-sm bg-emerald-500"
-            style={{ height: MIN_BAR_HEIGHT_PX, opacity: 0.8 }}
+            className={`w-[3px] rounded-full transition-colors ${
+              nowPlaying
+                ? "bg-gradient-to-t from-violet-600 to-fuchsia-400"
+                : "bg-slate-300"
+            }`}
+            style={{ height: MIN_BAR_HEIGHT_PX }}
           />
         ))}
       </div>
-      <span className="font-mono text-xs text-zinc-400">
-        {nowPlaying ? `Playing: ${nowPlaying}` : "No audio yet"}
-      </span>
+
+      {nowPlaying ? (
+        <span className="flex items-center gap-1.5 text-xs font-medium text-slate-600">
+          Now speaking
+          <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-semibold capitalize text-violet-700">
+            {nowPlaying}
+          </span>
+        </span>
+      ) : (
+        <span className="text-xs font-medium text-slate-400">No audio yet</span>
+      )}
     </div>
   );
 }
