@@ -66,6 +66,17 @@ export type AudioEndMessage = {
   sequence: number;
 };
 
+// Recent history of a conversation that had been running unheard in the
+// background, handed over when the viewer tunes into it. Deliberately NOT a
+// series of dialogue_turn messages: those are audio-paced (each waits on its
+// own audio_end before being revealed) and these historical lines carry no
+// audio, so they go straight into the transcript instead.
+export type TranscriptBackfillMessage = {
+  type: "transcript_backfill";
+  batch_id: string;
+  turns: Omit<DialogueTurnMessage, "type" | "batch_id">[];
+};
+
 export type TrustSnapshotMessage = {
   type: "trust_snapshot";
   trust_matrix: Record<string, Record<string, number>>;
@@ -104,6 +115,7 @@ export type ServerMessage =
   | ShowStateMessage
   | BatchesSnapshotMessage
   | DialogueTurnMessage
+  | TranscriptBackfillMessage
   | AudioChunkMessage
   | AudioEndMessage
   | TrustSnapshotMessage
@@ -129,13 +141,24 @@ export type FocusBatchMessage = {
   batch_id: string;
 };
 
+// Sent once a line has finished playing — or been discarded without playing.
+// The backend holds the focused conversation until this arrives, so it can't
+// generate (and reshuffle) faster than the audio can actually be heard.
+// Must be sent in every case a turn is resolved, including failures, or that
+// conversation stalls until the server-side timeout.
+export type PlaybackDoneMessage = {
+  type: "playback_done";
+  batch_id: string;
+};
+
 export type ClientMessage =
   | StartMessage
   | StopMessage
   | ResetMessage
   | PingMessage
   | GodMicTranscriptFinalMessage
-  | FocusBatchMessage;
+  | FocusBatchMessage
+  | PlaybackDoneMessage;
 
 export type ConnectionStatus = "connecting" | "open" | "closed";
 

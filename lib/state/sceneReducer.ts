@@ -61,6 +61,14 @@ export function sceneReducer(state: SceneState, action: SceneAction): SceneState
       for (const batch of action.batches) {
         batches[batch.id] = batch.participants;
       }
+      // Deliberately does NOT touch the transcript. The viewer is tuned to
+      // one conversation and stays tuned to it; the Director walking a
+      // contestant in or out (or renumbering the batch around them) does
+      // not make it a different conversation, so the dialogue they've been
+      // reading has to survive it. Clearing here wiped the panels every few
+      // seconds — membership churns faster than audio-paced reveal can put
+      // messages on screen, so nothing was ever readable. Only an explicit
+      // viewer switch resets the log; see the focus_changed case.
       return {
         ...state,
         batches,
@@ -68,6 +76,23 @@ export function sceneReducer(state: SceneState, action: SceneAction): SceneState
         focusedBatchId: action.focused_batch_id,
       };
     }
+
+    case "transcript_backfill":
+      // Straight into the visible transcript, ahead of whatever the paced
+      // path is about to reveal — these are older lines with no audio, so
+      // there is nothing to pace them against. Appended rather than
+      // substituted so it can only ever add the history the viewer missed.
+      return {
+        ...state,
+        transcript: [
+          ...state.transcript,
+          ...action.turns.map((turn) => ({
+            ...turn,
+            type: "dialogue_turn" as const,
+            batch_id: action.batch_id,
+          })),
+        ].slice(-MAX_TRANSCRIPT_LENGTH),
+      };
 
     case "dialogue_turn":
       return {

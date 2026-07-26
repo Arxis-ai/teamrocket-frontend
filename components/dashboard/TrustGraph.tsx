@@ -34,11 +34,15 @@ type SpeechBubble = {
 };
 
 export function TrustGraph() {
-  const { state, onMessage } = useSceneState();
+  const { state } = useSceneState();
   const [floatingNumbers, setFloatingNumbers] = useState<FloatingNumber[]>([]);
   const [speechBubbles, setSpeechBubbles] = useState<Record<string, SpeechBubble>>({});
   const processedTranscriptLengthRef = useRef(0);
   const bubbleTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  // Whoever we're currently listening to — used to drop a bubble the moment
+  // its speaker is traded out of the watched conversation.
+  const focusedLineUp = (state.focusedBatchId ? state.batches[state.focusedBatchId] : undefined) ?? [];
 
   useEffect(() => {
     // transcript is cleared to [] on a real focus switch (see sceneReducer's
@@ -69,7 +73,10 @@ export function TrustGraph() {
       const bubbleId = `${turn.character_id}-${Date.now()}-${Math.random()}`;
       setSpeechBubbles((prev) => ({
         ...prev,
-        [turn.character_id]: { id: bubbleId, text: truncate(turn.public_dialogue, SPEECH_BUBBLE_MAX_CHARS) },
+        [turn.character_id]: {
+          id: bubbleId,
+          text: truncate(turn.public_dialogue, SPEECH_BUBBLE_MAX_CHARS),
+        },
       }));
       const existingTimer = bubbleTimersRef.current[turn.character_id];
       if (existingTimer) clearTimeout(existingTimer);
@@ -92,22 +99,6 @@ export function TrustGraph() {
     };
   }, []);
 
-  useEffect(() => {
-    // A real user-initiated switch (not a same-conversation reshuffle —
-    // see AudioPlayer's identical distinction) must clear stale bubbles
-    // immediately rather than waiting out whatever's left of their own
-    // independent 6s timers, which is what made a just-left batch's text
-    // appear to "stick" on the graph after switching.
-    const unsubscribe = onMessage((message) => {
-      if (message.type === "focus_changed") {
-        Object.values(bubbleTimersRef.current).forEach(clearTimeout);
-        bubbleTimersRef.current = {};
-        setSpeechBubbles({});
-        setFloatingNumbers([]);
-      }
-    });
-    return unsubscribe;
-  }, [onMessage]);
 
   const characters =
     state.characters.length > 0
@@ -205,7 +196,13 @@ export function TrustGraph() {
         })}
         {positions.map(({ characterId, x, y }) => {
           const bubble = speechBubbles[characterId];
-          if (!bubble) return null;
+          // Drop it the moment this speaker is no longer in the watched
+          // conversation, rather than waiting out the remainder of its own
+          // 6s timer — that lag is what left a just-left batch's text stuck
+          // on the graph after switching, and it covers someone traded away
+          // mid-scene too. Checked per character so one person leaving
+          // doesn't blank out everyone else's bubble.
+          if (!bubble || !focusedLineUp.includes(characterId)) return null;
           const style = TIER_STYLE[characterTier(characterId, state.batches, state.focusedBatchId)];
           const bubbleWidth = 100;
           const bubbleHeight = 30;

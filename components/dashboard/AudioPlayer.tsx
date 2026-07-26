@@ -29,6 +29,7 @@ function concatUint8Arrays(chunks: Uint8Array[]): ArrayBuffer {
 
 type QueuedTurn = {
   characterId: string;
+  batchId: string;
   buffer: ArrayBuffer;
   // Reveals this turn's dialogue_turn (see sceneReducer's pendingTurns) —
   // called the moment this line actually starts playing, so captions never
@@ -41,7 +42,7 @@ type QueuedTurn = {
 // file. Bytes must be accumulated until audio_end (one contestant line)
 // before a single decodeAudioData call, per 02_BACKEND_HANDOFF.md.
 export function AudioPlayer() {
-  const { state, onMessage, revealNextTurn } = useSceneState();
+  const { state, onMessage, revealNextTurn, send } = useSceneState();
   const [nowPlaying, setNowPlaying] = useState<string | null>(null);
   const barRefs = useRef<(HTMLSpanElement | null)[]>([]);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -98,6 +99,13 @@ export function AudioPlayer() {
     animationFrameRef.current = requestAnimationFrame(drawVisualizer);
   };
 
+  // Releases the backend to generate this conversation's next turn. Must
+  // fire on every path that resolves a turn — played, failed to decode, or
+  // discarded — because the focused batch is blocked until it arrives.
+  const ackPlayback = (batchId: string) => {
+    send({ type: "playback_done", batch_id: batchId });
+  };
+
   const playNext = async () => {
     const turn = queueRef.current.shift();
     if (!turn) {
@@ -121,6 +129,9 @@ export function AudioPlayer() {
       currentSourceRef.current = source;
       source.onended = () => {
         if (currentSourceRef.current === source) currentSourceRef.current = null;
+        // Fires on natural end AND on an explicit stop() (focus switch,
+        // show stopped), so a cut-off line still releases the backend.
+        ackPlayback(turn.batchId);
         void playNext();
       };
       source.start();
@@ -132,6 +143,7 @@ export function AudioPlayer() {
       // needs to be revealed, just without audio, so captions/monologue
       // don't get stuck waiting on a line that will never play.
       turn.reveal();
+      ackPlayback(turn.batchId);
       void playNext();
     }
   };
@@ -175,6 +187,8 @@ export function AudioPlayer() {
         if (message.batch_id !== focusedBatchIdRef.current) {
           pendingChunksRef.current = [];
           revealNextTurn();
+          // Discarded, but the sender is still blocked on it.
+          ackPlayback(message.batch_id);
           return;
         }
         const chunks = pendingChunksRef.current;
@@ -182,6 +196,7 @@ export function AudioPlayer() {
         if (chunks.length > 0) {
           queueRef.current.push({
             characterId: message.character_id,
+            batchId: message.batch_id,
             buffer: concatUint8Arrays(chunks),
             reveal: revealNextTurn,
           });
@@ -190,6 +205,7 @@ export function AudioPlayer() {
           // No audio for this turn at all — nothing to pace against, so
           // reveal immediately instead of leaving it stuck in pendingTurns.
           revealNextTurn();
+          ackPlayback(message.batch_id);
         }
       }
     });
