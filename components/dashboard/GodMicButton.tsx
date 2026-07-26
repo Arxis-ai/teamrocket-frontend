@@ -5,21 +5,8 @@ import { useSceneState } from "@/lib/state/SceneStateProvider";
 import { Button } from "@/components/ui/button";
 import { getDeepgramToken } from "@/lib/deepgram/tokenCache";
 
-// Raw PCM buffer size per audio-processing callback. WebM/Opus via
-// MediaRecorder was tried first and doesn't reliably reach Deepgram's
-// real-time API through a relay (fragmented container — see
-// github.com/orgs/deepgram/discussions/1073). Raw linear16 PCM is the path
-// that actually works.
 const PCM_BUFFER_SIZE = 4096;
 const DEEPGRAM_MODEL = process.env.NEXT_PUBLIC_DEEPGRAM_MODEL ?? "nova-3";
-
-// The backend does not proxy microphone audio over /ws/show (see
-// 02_BACKEND_HANDOFF.md "Not implemented yet" — backend-proxy Deepgram
-// streaming). Instead the frontend mints a short-lived Deepgram key via
-// POST /api/deepgram/token (cached in lib/deepgram/tokenCache.ts so a
-// rapid double-press doesn't mint a fresh key every time) and streams
-// straight to Deepgram from the browser, then forwards only the final
-// transcript text to the backend as godmic_transcript_final.
 
 function floatTo16BitPCM(input: Float32Array): ArrayBuffer {
   const output = new Int16Array(input.length);
@@ -32,8 +19,8 @@ function floatTo16BitPCM(input: Float32Array): ArrayBuffer {
 
 type CaptureHandle = {
   audioContext: AudioContext;
-  source: MediaStreamAudioSourceNode;
-  processor: ScriptProcessorNode;
+  source: MediaStreamAudioSourceNode | null;
+  processor: ScriptProcessorNode | null;
   stream: MediaStream;
 };
 
@@ -41,9 +28,6 @@ type DeepgramMessage = {
   type?: string;
   is_final?: boolean;
   channel?: { alternatives?: { transcript?: string }[] };
-  // Present on Deepgram's error-shaped messages (exact shape isn't
-  // consistently documented) — surfaced so a real auth/config error
-  // doesn't look identical to "nothing happened."
   description?: string;
   message?: string;
 };
@@ -51,127 +35,94 @@ type DeepgramMessage = {
 export function GodMicButton() {
   const { state, send } = useSceneState();
   const [selectedTarget, setSelectedTarget] = useState<string | null>(null);
-  const [pendingTarget, setPendingTarget] = useState<string | null>(null);
+  const [inputText, setInputText] = useState("");
+  const [micActive, setMicActive] = useState(false);
+  const [micPending, setMicPending] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
-  const [interimTranscript, setInterimTranscript] = useState("");
+  const [lastSent, setLastSent] = useState<string | null>(null);
+
   const captureRef = useRef<CaptureHandle | null>(null);
   const deepgramSocketRef = useRef<WebSocket | null>(null);
-  const finalPiecesRef = useRef<string[]>([]);
-  const targetRef = useRef<string | null>(null);
-  // Guards a release that happens while still awaiting the token/mic
-  // permission (a very quick press-release) — capture must stop the
-  // moment it actually starts, instead of recording indefinitely.
-  const releaseRequestedRef = useRef(false);
-  // Distinguishes an intentional stopDeepgram() close from the socket
-  // dying unexpectedly mid-recording (auth issue, network drop) — both
-  // fire the same "close" event, so this is set right before the
-  // intentional close and checked inside the close handler.
   const intentionalCloseRef = useRef(false);
+  const finalPiecesRef = useRef<string[]>([]);
 
-  // God Mic can only target a character in the batch you're currently
-  // focused on (listening to) — the backend rejects whispers into any
-  // other conversation, even an active one you're just not tuned into.
-  const activeCharacters = state.focusedBatchId ? (state.batches[state.focusedBatchId] ?? []) : [];
+  // Characters visible in the currently focused batch.
+  const activeCharacters = state.focusedBatchId
+    ? (state.batches[state.focusedBatchId] ?? [])
+    : [];
 
+  // ── Audio graph teardown ───────────────────────────────────────────────
   const stopCapture = () => {
     const capture = captureRef.current;
     if (!capture) return;
-    // source/processor may be null if stopCapture is called before the
-    // WebSocket "open" event fires and the full audio graph is wired up.
     capture.processor?.disconnect();
     capture.source?.disconnect();
-    capture.stream.getTracks().forEach((track) => track.stop());
+    capture.stream.getTracks().forEach((t) => t.stop());
     void capture.audioContext.close();
     captureRef.current = null;
   };
 
-  const finalizeAndSend = () => {
-    const text = finalPiecesRef.current.join(" ").trim();
-    finalPiecesRef.current = [];
-    setInterimTranscript("");
-    const target = targetRef.current;
-    targetRef.current = null;
-    console.log(`[GodMicButton] finalizing whisper — target="${target}" text="${text}"`);
-    if (text && target) {
-      console.log("[GodMicButton] sending godmic_transcript_final to the backend");
-      send({ type: "godmic_transcript_final", target_character: target, text });
-    } else if (target) {
-      console.warn("[GodMicButton] nothing was transcribed — not sending anything to the backend");
-      setMicError("No speech detected — try holding the button longer and speaking clearly.");
-    }
-  };
-
-  const stopDeepgram = () => {
+  // ── Stop Deepgram, collect remaining transcript into inputText ─────────
+  const stopMicAndCollect = () => {
+    stopCapture();
     const socket = deepgramSocketRef.current;
     deepgramSocketRef.current = null;
     intentionalCloseRef.current = true;
-    // Guard: if both the timeout and the close event fire in quick succession
-    // (e.g. server acks CloseStream before clearTimeout runs), make sure
-    // finalizeAndSend is only called once.
+
     let finalized = false;
-    const safeFinalize = () => {
+    const doFinalize = () => {
       if (finalized) return;
       finalized = true;
-      finalizeAndSend();
+      const pieces = finalPiecesRef.current.join(" ").trim();
+      finalPiecesRef.current = [];
+      if (pieces) {
+        setInputText((prev) => (prev ? `${prev} ${pieces}` : pieces));
+      }
+      setMicActive(false);
     };
+
     if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
-      console.warn("[GodMicButton] stopDeepgram called but socket wasn't open — finalizing with whatever was captured");
-      safeFinalize();
+      doFinalize();
       return;
     }
-    // Give Deepgram a moment to flush the trailing final result after we
-    // signal end-of-stream, then finalize whatever we've accumulated.
-    console.log("[GodMicButton] sending CloseStream, waiting for Deepgram to flush the final result");
-    const finalizeTimer = setTimeout(() => {
-      console.warn("[GodMicButton] Deepgram didn't close within 1s of CloseStream — finalizing anyway");
+
+    const timer = setTimeout(() => {
       socket.close();
-      safeFinalize();
+      doFinalize();
     }, 1000);
-    socket.addEventListener(
-      "close",
-      () => {
-        clearTimeout(finalizeTimer);
-        safeFinalize();
-      },
-      { once: true }
-    );
+    socket.addEventListener("close", () => { clearTimeout(timer); doFinalize(); }, { once: true });
     try {
       socket.send(JSON.stringify({ type: "CloseStream" }));
-    } catch (error) {
-      console.error("[GodMicButton] failed to send CloseStream", error);
-      clearTimeout(finalizeTimer);
+    } catch {
+      clearTimeout(timer);
       socket.close();
-      safeFinalize();
+      doFinalize();
     }
   };
 
-  const handlePress = async (characterId: string) => {
-    if (captureRef.current || pendingTarget) return; // already recording/loading, ignore re-press
+  // ── Start Deepgram mic recording, appends transcript into inputText ────
+  const startMic = async () => {
+    if (micPending || micActive) return;
     setMicError(null);
-    setInterimTranscript("");
-    finalPiecesRef.current = [];
-    releaseRequestedRef.current = false;
+    setMicPending(true);
     intentionalCloseRef.current = false;
-    setPendingTarget(characterId);
+    finalPiecesRef.current = [];
 
     let key: string;
     try {
       key = await getDeepgramToken();
-      console.log("[GodMicButton] Deepgram token acquired");
-    } catch (error) {
-      console.error("[GodMicButton] failed to mint Deepgram token", error);
+    } catch {
       setMicError("Could not reach the backend for a Deepgram token.");
-      setPendingTarget(null);
+      setMicPending(false);
       return;
     }
 
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (error) {
-      console.error("[GodMicButton] microphone access failed", error);
+    } catch {
       setMicError("Microphone permission denied or unavailable.");
-      setPendingTarget(null);
+      setMicPending(false);
       return;
     }
 
@@ -180,176 +131,208 @@ export function GodMicButton() {
     const dgUrl =
       `wss://api.deepgram.com/v1/listen?model=${DEEPGRAM_MODEL}` +
       `&encoding=linear16&sample_rate=${sampleRate}&channels=1&interim_results=true&punctuate=true`;
-    console.log("[GodMicButton] connecting to Deepgram", dgUrl);
     const deepgramSocket = new WebSocket(dgUrl, ["token", key]);
 
     deepgramSocket.addEventListener("open", () => {
-      console.log("[GodMicButton] Deepgram connection open, selected subprotocol:", deepgramSocket.protocol);
-      // BUG FIX: Only wire up and start sending PCM *after* the socket is
-      // confirmed OPEN. Starting earlier causes every onaudioprocess callback
-      // during the WebSocket handshake (100-500ms) to be silently dropped
-      // because readyState !== OPEN — that's the first second of speech lost.
-      if (releaseRequestedRef.current) {
-        // User released before the socket even opened — abort cleanly.
-        console.warn("[GodMicButton] release was requested before socket opened — aborting");
+      if (intentionalCloseRef.current) {
+        // Toggled off before socket opened
         stopCapture();
-        stopDeepgram();
-        setSelectedTarget(null);
+        deepgramSocket.close();
+        setMicActive(false);
+        setMicPending(false);
         return;
       }
       const source = audioContext.createMediaStreamSource(stream);
       const processor = audioContext.createScriptProcessor(PCM_BUFFER_SIZE, 1, 1);
-      // A muted gain node keeps the processor in the audio graph (required for
-      // onaudioprocess to fire in some browsers) without playing audio back.
       const silentGain = audioContext.createGain();
       silentGain.gain.value = 0;
-
       processor.onaudioprocess = (ev) => {
         const socket = deepgramSocketRef.current;
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        const input = ev.inputBuffer.getChannelData(0);
-        socket.send(floatTo16BitPCM(input));
+        socket.send(floatTo16BitPCM(ev.inputBuffer.getChannelData(0)));
       };
-
       source.connect(processor);
       processor.connect(silentGain);
       silentGain.connect(audioContext.destination);
-      // Update the capture ref with the full graph so stopCapture() can
-      // disconnect everything properly on release.
       captureRef.current = { audioContext, source, processor, stream };
-      setSelectedTarget(characterId);
+      setMicActive(true);
+      setMicPending(false);
     });
 
     deepgramSocket.addEventListener("message", (event) => {
       let parsed: DeepgramMessage;
-      try {
-        parsed = JSON.parse(event.data) as DeepgramMessage;
-      } catch (error) {
-        console.error("[GodMicButton] failed to parse Deepgram message", error, event.data);
-        return;
-      }
-
-      if (parsed.type === "Metadata") {
-        console.log("[GodMicButton] Deepgram Metadata (stream wrapping up)", parsed);
-        return;
-      }
+      try { parsed = JSON.parse(event.data) as DeepgramMessage; } catch { return; }
+      if (parsed.type === "Metadata") return;
       if (parsed.type !== "Results") {
-        // Anything other than Results/Metadata is unexpected — could be a
-        // real Deepgram-side error (bad model/params/auth) that would
-        // otherwise look identical to "the button just didn't do anything."
-        console.warn("[GodMicButton] unexpected Deepgram message, surfacing it instead of silently dropping it", parsed);
         setMicError(`Deepgram: ${parsed.description ?? parsed.message ?? parsed.type ?? "unexpected response"}`);
         return;
       }
-
       const transcript = parsed.channel?.alternatives?.[0]?.transcript ?? "";
-      if (parsed.is_final) {
-        console.log(`[GodMicButton] is_final result: "${transcript}"`);
-      }
       if (!transcript) return;
       if (parsed.is_final) {
         finalPiecesRef.current.push(transcript);
-        console.log("[GodMicButton] accumulated so far:", JSON.stringify(finalPiecesRef.current.join(" ")));
-        setInterimTranscript("");
+        // Show live interim feedback in the text box
+        setInputText(finalPiecesRef.current.join(" "));
       } else {
-        setInterimTranscript(transcript);
+        // Show interim (not-yet-final) text as a preview suffix
+        setInputText(finalPiecesRef.current.concat(transcript).join(" "));
       }
     });
-    deepgramSocket.addEventListener("error", (event) => {
-      console.error("[GodMicButton] Deepgram socket error", event);
-      setMicError("Deepgram connection error.");
-    });
+
+    deepgramSocket.addEventListener("error", () => setMicError("Deepgram connection error."));
     deepgramSocket.addEventListener("close", (event) => {
       if (intentionalCloseRef.current) return;
-      // Closed on its own while we were still supposed to be recording —
-      // e.g. an auth problem or the connection dropping. Without this,
-      // the UI would keep showing "recording" while nothing is happening.
-      console.error("[GodMicButton] Deepgram closed unexpectedly", { code: event.code, reason: event.reason });
-      setMicError(`Deepgram connection closed unexpectedly (${event.code}). Release and try again.`);
+      setMicError(`Deepgram closed unexpectedly (${event.code}). Try again.`);
+      setMicActive(false);
     });
+
     deepgramSocketRef.current = deepgramSocket;
-
-    // Store a minimal capture handle now so stopCapture() during the pending
-    // window (before `open` fires and the full graph is wired) can at least
-    // stop the mic track and close the AudioContext.
-    captureRef.current = { audioContext, source: null as unknown as MediaStreamAudioSourceNode, processor: null as unknown as ScriptProcessorNode, stream };
-    targetRef.current = characterId;
-    setPendingTarget(null);
-
-    if (releaseRequestedRef.current) {
-      // User already released while we were fetching the token/mic
-      // permission — stop immediately instead of recording indefinitely.
-      stopCapture();
-      stopDeepgram();
-      setSelectedTarget(null);
-      return;
-    }
-    // Note: setSelectedTarget is now called inside the "open" handler so the
-    // amber active state only shows once we're actually streaming audio.
+    // Minimal stub so stopCapture works during the pending window
+    captureRef.current = {
+      audioContext,
+      source: null,
+      processor: null,
+      stream,
+    };
   };
 
-  const handleRelease = () => {
-    releaseRequestedRef.current = true;
-    // BUG FIX: must stop even when still in the pending (Connecting…) phase.
-    // selectedTarget is null until the socket opens, so checking only
-    // selectedTarget caused the Deepgram socket to be leaked open whenever
-    // the user released the button before the handshake completed.
-    if (selectedTarget || captureRef.current || deepgramSocketRef.current) {
-      stopCapture();
-      stopDeepgram();
+  const handleMicToggle = () => {
+    if (micActive) {
+      intentionalCloseRef.current = true;
+      stopMicAndCollect();
+    } else {
+      void startMic();
     }
-    setSelectedTarget(null);
   };
+
+  // ── Send the typed/dictated text to the selected target ───────────────
+  const handleSend = () => {
+    const text = inputText.trim();
+    if (!text || !selectedTarget) return;
+    send({ type: "godmic_transcript_final", target_character: selectedTarget, text });
+    setLastSent(`"${text}" → ${selectedTarget}`);
+    setInputText("");
+    setMicError(null);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  const canSend = inputText.trim().length > 0 && selectedTarget !== null;
 
   return (
     <div className="flex flex-col gap-2 border-t border-zinc-800 bg-zinc-950/60 p-4">
-      <h2 className="text-xs uppercase tracking-widest text-amber-500/70">
-        God Mic
-      </h2>
+      <h2 className="text-xs uppercase tracking-widest text-amber-500/70">God Mic</h2>
+
+      {/* Target character selector — single-click to select */}
       <div className="flex flex-wrap gap-2">
         {activeCharacters.length === 0 && (
           <p className="text-sm text-zinc-500">No active characters to target.</p>
         )}
         {activeCharacters.map((characterId) => {
-          const isPending = pendingTarget === characterId;
-          const isRecording = selectedTarget === characterId;
+          const isSelected = selectedTarget === characterId;
           return (
             <Button
               key={characterId}
               className={
-                isRecording
+                isSelected
                   ? "max-w-[200px] truncate border-amber-600 bg-amber-600 text-white hover:bg-amber-500 active:bg-amber-700"
                   : "max-w-[200px] truncate border-zinc-700 bg-transparent text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 active:bg-zinc-700"
               }
-              disabled={isPending}
-              onMouseDown={() => void handlePress(characterId)}
-              onMouseUp={handleRelease}
-              onMouseLeave={() => isRecording && handleRelease()}
+              onClick={() => setSelectedTarget(isSelected ? null : characterId)}
             >
-              {isPending ? (
-                <span className="flex items-center gap-1.5">
-                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                  Connecting…
-                </span>
-              ) : (
-                `Whisper to ${characterId}`
-              )}
+              {characterId}
             </Button>
           );
         })}
       </div>
-      {micError && <p className="font-mono text-xs text-red-400">{micError}</p>}
-      {selectedTarget && interimTranscript && (
-        <p className="font-mono text-xs text-amber-200/60">
-          &ldquo;{interimTranscript}&rdquo;
-          <span className="animate-pulse"> …</span>
-        </p>
-      )}
-      {state.godMic.transcript && (
-        <p className="font-mono text-xs text-amber-200/80">
-          Sent: &ldquo;{state.godMic.transcript}&rdquo;
-        </p>
-      )}
+
+      {/* Always-visible text input + mic + send row */}
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-end gap-2">
+          <textarea
+            value={inputText}
+            onChange={(e) => setInputText(e.target.value)}
+            onKeyDown={handleKeyDown}
+            rows={2}
+            placeholder={
+              selectedTarget
+                ? `Whisper to ${selectedTarget}… (Enter to send)`
+                : "Select a character above, then type or dictate…"
+            }
+            className="min-h-[3rem] flex-1 resize-none rounded border border-zinc-800 bg-zinc-900/60 px-3 py-2 font-mono text-xs text-zinc-100 placeholder-zinc-600 outline-none transition-colors focus:border-amber-600/60 focus:bg-zinc-900"
+          />
+
+          {/* Mic toggle button */}
+          <button
+            type="button"
+            onClick={handleMicToggle}
+            disabled={micPending}
+            title={micActive ? "Stop recording" : "Start dictating"}
+            className={`flex h-[3rem] w-10 shrink-0 items-center justify-center rounded border transition-colors ${
+              micActive
+                ? "border-red-600 bg-red-900/30 text-red-400 hover:bg-red-900/50"
+                : micPending
+                ? "border-zinc-700 bg-zinc-800 text-zinc-500"
+                : "border-zinc-700 bg-transparent text-zinc-400 hover:border-amber-600/60 hover:text-amber-400"
+            }`}
+          >
+            {micPending ? (
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+            ) : micActive ? (
+              /* Stop icon */
+              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
+            ) : (
+              /* Mic icon */
+              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
+                <path d="M12 1a4 4 0 0 1 4 4v6a4 4 0 0 1-8 0V5a4 4 0 0 1 4-4zm-1 19.93V21h-3a1 1 0 0 0 0 2h8a1 1 0 0 0 0-2h-3v-.07A9 9 0 0 0 21 12a1 1 0 0 0-2 0 7 7 0 0 1-14 0 1 1 0 0 0-2 0 9 9 0 0 0 8 8.93z" />
+              </svg>
+            )}
+          </button>
+
+          {/* Send button */}
+          <button
+            type="button"
+            onClick={handleSend}
+            disabled={!canSend}
+            title="Send whisper"
+            className={`flex h-[3rem] w-10 shrink-0 items-center justify-center rounded border transition-colors ${
+              canSend
+                ? "border-amber-600 bg-amber-600/20 text-amber-400 hover:bg-amber-600/40"
+                : "border-zinc-800 bg-transparent text-zinc-700"
+            }`}
+          >
+            {/* Arrow-up send icon */}
+            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <line x1="12" y1="19" x2="12" y2="5" />
+              <polyline points="5 12 12 5 19 12" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Status line — always present, never jumps layout */}
+        <div className="min-h-[1.25rem]">
+          {micError ? (
+            <p className="font-mono text-xs text-red-400">{micError}</p>
+          ) : micActive ? (
+            <p className="font-mono text-xs text-red-400 animate-pulse">● Recording…</p>
+          ) : lastSent && !inputText ? (
+            <p className="font-mono text-xs text-amber-200/70">Sent: {lastSent}</p>
+          ) : !selectedTarget ? (
+            <p className="font-mono text-xs text-zinc-600">Select a target character first</p>
+          ) : (
+            <p className="font-mono text-xs text-zinc-600">
+              Target: <span className="text-amber-400/80 capitalize">{selectedTarget}</span>
+            </p>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
