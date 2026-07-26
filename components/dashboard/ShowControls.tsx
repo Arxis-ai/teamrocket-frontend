@@ -12,15 +12,15 @@ export function ShowControls() {
       <Button
         size="sm"
         disabled={!connected || state.showRunning}
-        className="bg-emerald-700 hover:bg-emerald-600"
+        className="border-emerald-700 bg-emerald-700 text-white hover:bg-emerald-600 active:bg-emerald-800"
         onClick={() => send({ type: "start" })}
       >
         Start
       </Button>
       <Button
         size="sm"
-        variant="outline"
         disabled={!connected || !state.showRunning}
+        className="border-zinc-700 bg-transparent text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 active:bg-zinc-700"
         onClick={() => send({ type: "stop" })}
       >
         Stop

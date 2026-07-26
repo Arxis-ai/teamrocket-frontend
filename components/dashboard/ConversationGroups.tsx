@@ -29,7 +29,7 @@ export function ConversationGroups() {
               key={batchId}
               type="button"
               onClick={() => send({ type: "focus_batch", batch_id: batchId })}
-              className={`flex flex-col gap-1 rounded border px-3 py-2 text-left transition-colors ${
+              className={`flex flex-col gap-1 rounded border px-3 py-2 text-ft transition-colors ${
                 isFocused
                   ? "border-sky-600 bg-sky-950/40"
                   : "border-zinc-800 bg-zinc-950/60 hover:border-zinc-700"

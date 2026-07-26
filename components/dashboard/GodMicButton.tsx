@@ -76,8 +76,10 @@ export function GodMicButton() {
   const stopCapture = () => {
     const capture = captureRef.current;
     if (!capture) return;
-    capture.processor.disconnect();
-    capture.source.disconnect();
+    // source/processor may be null if stopCapture is called before the
+    // WebSocket "open" event fires and the full audio graph is wired up.
+    capture.processor?.disconnect();
+    capture.source?.disconnect();
     capture.stream.getTracks().forEach((track) => track.stop());
     void capture.audioContext.close();
     captureRef.current = null;
@@ -103,9 +105,18 @@ export function GodMicButton() {
     const socket = deepgramSocketRef.current;
     deepgramSocketRef.current = null;
     intentionalCloseRef.current = true;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      console.warn("[GodMicButton] stopDeepgram called but socket wasn't open — finalizing with whatever was captured");
+    // Guard: if both the timeout and the close event fire in quick succession
+    // (e.g. server acks CloseStream before clearTimeout runs), make sure
+    // finalizeAndSend is only called once.
+    let finalized = false;
+    const safeFinalize = () => {
+      if (finalized) return;
+      finalized = true;
       finalizeAndSend();
+    };
+    if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+      console.warn("[GodMicButton] stopDeepgram called but socket wasn't open — finalizing with whatever was captured");
+      safeFinalize();
       return;
     }
     // Give Deepgram a moment to flush the trailing final result after we
@@ -114,13 +125,13 @@ export function GodMicButton() {
     const finalizeTimer = setTimeout(() => {
       console.warn("[GodMicButton] Deepgram didn't close within 1s of CloseStream — finalizing anyway");
       socket.close();
-      finalizeAndSend();
+      safeFinalize();
     }, 1000);
     socket.addEventListener(
       "close",
       () => {
         clearTimeout(finalizeTimer);
-        finalizeAndSend();
+        safeFinalize();
       },
       { once: true }
     );
@@ -130,7 +141,7 @@ export function GodMicButton() {
       console.error("[GodMicButton] failed to send CloseStream", error);
       clearTimeout(finalizeTimer);
       socket.close();
-      finalizeAndSend();
+      safeFinalize();
     }
   };
 
@@ -171,9 +182,44 @@ export function GodMicButton() {
       `&encoding=linear16&sample_rate=${sampleRate}&channels=1&interim_results=true&punctuate=true`;
     console.log("[GodMicButton] connecting to Deepgram", dgUrl);
     const deepgramSocket = new WebSocket(dgUrl, ["token", key]);
+
     deepgramSocket.addEventListener("open", () => {
       console.log("[GodMicButton] Deepgram connection open, selected subprotocol:", deepgramSocket.protocol);
+      // BUG FIX: Only wire up and start sending PCM *after* the socket is
+      // confirmed OPEN. Starting earlier causes every onaudioprocess callback
+      // during the WebSocket handshake (100-500ms) to be silently dropped
+      // because readyState !== OPEN — that's the first second of speech lost.
+      if (releaseRequestedRef.current) {
+        // User released before the socket even opened — abort cleanly.
+        console.warn("[GodMicButton] release was requested before socket opened — aborting");
+        stopCapture();
+        stopDeepgram();
+        setSelectedTarget(null);
+        return;
+      }
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(PCM_BUFFER_SIZE, 1, 1);
+      // A muted gain node keeps the processor in the audio graph (required for
+      // onaudioprocess to fire in some browsers) without playing audio back.
+      const silentGain = audioContext.createGain();
+      silentGain.gain.value = 0;
+
+      processor.onaudioprocess = (ev) => {
+        const socket = deepgramSocketRef.current;
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        const input = ev.inputBuffer.getChannelData(0);
+        socket.send(floatTo16BitPCM(input));
+      };
+
+      source.connect(processor);
+      processor.connect(silentGain);
+      silentGain.connect(audioContext.destination);
+      // Update the capture ref with the full graph so stopCapture() can
+      // disconnect everything properly on release.
+      captureRef.current = { audioContext, source, processor, stream };
+      setSelectedTarget(characterId);
     });
+
     deepgramSocket.addEventListener("message", (event) => {
       let parsed: DeepgramMessage;
       try {
@@ -223,25 +269,10 @@ export function GodMicButton() {
     });
     deepgramSocketRef.current = deepgramSocket;
 
-    const source = audioContext.createMediaStreamSource(stream);
-    const processor = audioContext.createScriptProcessor(PCM_BUFFER_SIZE, 1, 1);
-    // A muted gain node keeps the processor in the audio graph (required for
-    // onaudioprocess to fire in some browsers) without playing audio back.
-    const silentGain = audioContext.createGain();
-    silentGain.gain.value = 0;
-
-    processor.onaudioprocess = (event) => {
-      const socket = deepgramSocketRef.current;
-      if (!socket || socket.readyState !== WebSocket.OPEN) return;
-      const input = event.inputBuffer.getChannelData(0);
-      socket.send(floatTo16BitPCM(input));
-    };
-
-    source.connect(processor);
-    processor.connect(silentGain);
-    silentGain.connect(audioContext.destination);
-
-    captureRef.current = { audioContext, source, processor, stream };
+    // Store a minimal capture handle now so stopCapture() during the pending
+    // window (before `open` fires and the full graph is wired) can at least
+    // stop the mic track and close the AudioContext.
+    captureRef.current = { audioContext, source: null as unknown as MediaStreamAudioSourceNode, processor: null as unknown as ScriptProcessorNode, stream };
     targetRef.current = characterId;
     setPendingTarget(null);
 
@@ -253,12 +284,17 @@ export function GodMicButton() {
       setSelectedTarget(null);
       return;
     }
-    setSelectedTarget(characterId);
+    // Note: setSelectedTarget is now called inside the "open" handler so the
+    // amber active state only shows once we're actually streaming audio.
   };
 
   const handleRelease = () => {
     releaseRequestedRef.current = true;
-    if (selectedTarget) {
+    // BUG FIX: must stop even when still in the pending (Connecting…) phase.
+    // selectedTarget is null until the socket opens, so checking only
+    // selectedTarget caused the Deepgram socket to be leaked open whenever
+    // the user released the button before the handshake completed.
+    if (selectedTarget || captureRef.current || deepgramSocketRef.current) {
       stopCapture();
       stopDeepgram();
     }
@@ -280,8 +316,11 @@ export function GodMicButton() {
           return (
             <Button
               key={characterId}
-              variant={isRecording ? "default" : "outline"}
-              className={isRecording ? "bg-amber-600 hover:bg-amber-600" : ""}
+              className={
+                isRecording
+                  ? "max-w-[200px] truncate border-amber-600 bg-amber-600 text-white hover:bg-amber-500 active:bg-amber-700"
+                  : "max-w-[200px] truncate border-zinc-700 bg-transparent text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 active:bg-zinc-700"
+              }
               disabled={isPending}
               onMouseDown={() => void handlePress(characterId)}
               onMouseUp={handleRelease}

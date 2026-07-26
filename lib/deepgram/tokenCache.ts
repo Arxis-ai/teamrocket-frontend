@@ -21,8 +21,12 @@ async function fetchToken(): Promise<string> {
   console.log("[tokenCache] fetching a fresh Deepgram token from the backend");
   const response = await fetch(apiUrl("/api/deepgram/token"), { method: "POST" });
   if (!response.ok) throw new Error(`token request failed: ${response.status}`);
-  const data = (await response.json()) as { key: string; expires_in: number };
-  cached = { key: data.key, expiresAt: Date.now() + data.expires_in * 1000 };
+  const data = (await response.json()) as { key: string; expires_in?: number };
+  // Guard: if the backend omits expires_in, `Date.now() + undefined * 1000`
+  // produces NaN, which makes the cache check always fail and every call
+  // fetches a fresh token. Default to 55s (a safe short TTL for Deepgram keys).
+  const ttlMs = (data.expires_in ?? 55) * 1000;
+  cached = { key: data.key, expiresAt: Date.now() + ttlMs };
   console.log(`[tokenCache] got a fresh token, valid for ${data.expires_in}s`);
   return data.key;
 }
