@@ -35,9 +35,15 @@ export function SceneStateProvider({ children }: { children: ReactNode }) {
     const unsubscribeStatus = socket.onStatusChange(setConnectionStatus);
 
     return () => {
+      // Unsubscribe only — deliberately does NOT close the socket. React
+      // StrictMode mounts, cleans up, then remounts in development, but the
+      // socket is created by a useState initializer that runs exactly once,
+      // so closing it here would tear down the one connection this page has
+      // and nothing would ever rebuild it — leaving every control disabled
+      // until a full reload. One socket per page load, closed by the browser
+      // when the page goes away.
       unsubscribeMessages();
       unsubscribeStatus();
-      socket.close();
     };
   }, [socket]);
 
