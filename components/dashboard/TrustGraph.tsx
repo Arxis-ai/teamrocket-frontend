@@ -5,21 +5,18 @@ import { useSceneState } from "@/lib/state/SceneStateProvider";
 import { characterTier, sameBatch } from "@/lib/state/characterTier";
 
 const FLOAT_DURATION_MS = 1200;
-const SPEECH_BUBBLE_DURATION_MS = 6000;
-const SPEECH_BUBBLE_MAX_CHARS = 60;
 
-const TIER_STYLE: Record<string, { fill: string; stroke: string; text: string; radius: number }> = {
-  focused: { fill: "#052e2b", stroke: "#10b981", text: "#d1fae5", radius: 22 },
-  active: { fill: "#082032", stroke: "#0ea5e9", text: "#bae6fd", radius: 18 },
-  off: { fill: "#18181b", stroke: "#3f3f46", text: "#71717a", radius: 16 },
+// Speaking highlight fades out after this many ms of silence
+const SPEAKING_FADE_MS = 4000;
+
+const TIER_STYLE: Record<string, { fill: string; stroke: string; text: string; radius: number; bubbleBorder: string }> = {
+  focused: { fill: "#052e2b", stroke: "#10b981", text: "#d1fae5", radius: 22, bubbleBorder: "#10b981" },
+  active:  { fill: "#082032", stroke: "#0ea5e9", text: "#bae6fd", radius: 18, bubbleBorder: "#0ea5e9" },
+  off:     { fill: "#18181b", stroke: "#3f3f46", text: "#71717a", radius: 16, bubbleBorder: "#52525b" },
 };
 
 function angleForIndex(index: number, total: number) {
   return (index / Math.max(total, 1)) * 2 * Math.PI - Math.PI / 2;
-}
-
-function truncate(text: string, maxChars: number): string {
-  return text.length > maxChars ? `${text.slice(0, maxChars - 3)}...` : text;
 }
 
 type FloatingNumber = {
@@ -28,23 +25,18 @@ type FloatingNumber = {
   change: number;
 };
 
-type SpeechBubble = {
-  id: string;
-  text: string;
-};
-
 export function TrustGraph() {
   const { state, onMessage } = useSceneState();
   const [floatingNumbers, setFloatingNumbers] = useState<FloatingNumber[]>([]);
-  const [speechBubbles, setSpeechBubbles] = useState<Record<string, SpeechBubble>>({});
+  // The character_id of whoever spoke most recently — cleared after SPEAKING_FADE_MS
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
   const processedTranscriptLengthRef = useRef(0);
-  const bubbleTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const speakingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     // transcript is cleared to [] on a real focus switch (see sceneReducer's
     // focus_changed case) — without this, the ref would stay stuck above
-    // the new (shorter) array's length and silently stop picking up any
-    // new turns until it grew back past the old high-water mark.
+    // the new (shorter) array's length and silently stop picking up new turns.
     if (state.transcript.length < processedTranscriptLengthRef.current) {
       processedTranscriptLengthRef.current = 0;
     }
@@ -63,46 +55,28 @@ export function TrustGraph() {
         }, FLOAT_DURATION_MS);
       }
 
-      // A hovering text box above whoever's speaking — applies to every
-      // batch's turns (not just the focused one), matching the existing
-      // pattern where text is always visible and only audio is focus-gated.
-      const bubbleId = `${turn.character_id}-${Date.now()}-${Math.random()}`;
-      setSpeechBubbles((prev) => ({
-        ...prev,
-        [turn.character_id]: { id: bubbleId, text: truncate(turn.public_dialogue, SPEECH_BUBBLE_MAX_CHARS) },
-      }));
-      const existingTimer = bubbleTimersRef.current[turn.character_id];
-      if (existingTimer) clearTimeout(existingTimer);
-      bubbleTimersRef.current[turn.character_id] = setTimeout(() => {
-        setSpeechBubbles((prev) => {
-          if (prev[turn.character_id]?.id !== bubbleId) return prev; // superseded by a newer line
-          const next = { ...prev };
-          delete next[turn.character_id];
-          return next;
-        });
-        delete bubbleTimersRef.current[turn.character_id];
-      }, SPEECH_BUBBLE_DURATION_MS);
+      // Highlight the speaking node — replaces the old speech bubble approach.
+      setSpeakingId(turn.character_id);
+      if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
+      speakingTimerRef.current = setTimeout(() => {
+        setSpeakingId(null);
+      }, SPEAKING_FADE_MS);
     });
   }, [state.transcript]);
 
   useEffect(() => {
-    const timers = bubbleTimersRef.current;
+    const timer = speakingTimerRef.current;
     return () => {
-      Object.values(timers).forEach(clearTimeout);
+      if (timer) clearTimeout(timer);
     };
   }, []);
 
   useEffect(() => {
-    // A real user-initiated switch (not a same-conversation reshuffle —
-    // see AudioPlayer's identical distinction) must clear stale bubbles
-    // immediately rather than waiting out whatever's left of their own
-    // independent 6s timers, which is what made a just-left batch's text
-    // appear to "stick" on the graph after switching.
+    // Clear speaking highlight immediately on a real focus switch.
     const unsubscribe = onMessage((message) => {
       if (message.type === "focus_changed") {
-        Object.values(bubbleTimersRef.current).forEach(clearTimeout);
-        bubbleTimersRef.current = {};
-        setSpeechBubbles({});
+        if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
+        setSpeakingId(null);
         setFloatingNumbers([]);
       }
     });
@@ -130,10 +104,6 @@ export function TrustGraph() {
     .flatMap(([fromId, targets]) =>
       Object.entries(targets).map(([toId, value]) => ({ fromId, toId, value }))
     )
-    // Only draw a line between two characters who are actually in the same
-    // conversation right now — trust values themselves stay global/always
-    // tracked, this just controls which pairs get a visible edge. Works
-    // the same regardless of how many characters end up in a batch.
     .filter((edge) => sameBatch(edge.fromId, edge.toId, state.batches))
     .map((edge) => {
       const from = positions.find((p) => p.characterId === edge.fromId);
@@ -146,6 +116,17 @@ export function TrustGraph() {
   return (
     <div className="flex h-full items-center justify-center p-4">
       <svg viewBox="0 0 300 300" className="h-full max-h-[320px] w-full max-w-[320px]">
+        {/* Ambient glow filter for the speaking node */}
+        <defs>
+          <filter id="speaking-glow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="4" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+        </defs>
+
         {edges.map((edge) => (
           <line
             key={`${edge.fromId}-${edge.toId}`}
@@ -158,32 +139,51 @@ export function TrustGraph() {
             strokeOpacity={0.6}
           />
         ))}
+
         {positions.map(({ characterId, x, y }) => {
           const tier = characterTier(characterId, state.batches, state.focusedBatchId);
           const style = TIER_STYLE[tier];
+          const isSpeaking = characterId === speakingId;
+
           return (
             <g key={characterId}>
+              {/* Outer pulse ring — only shown for the currently speaking node */}
+              {isSpeaking && (
+                <circle
+                  cx={x}
+                  cy={y}
+                  r={style.radius + 7}
+                  fill="none"
+                  stroke="#f59e0b"
+                  strokeWidth={2}
+                  strokeOpacity={0.7}
+                  style={{ animation: "ping 1s cubic-bezier(0,0,0.2,1) infinite" }}
+                />
+              )}
               <circle
                 cx={x}
                 cy={y}
                 r={style.radius}
-                fill={style.fill}
-                stroke={style.stroke}
-                strokeWidth={tier === "off" ? 1 : 2.5}
+                fill={isSpeaking ? "#1c1007" : style.fill}
+                stroke={isSpeaking ? "#f59e0b" : style.stroke}
+                strokeWidth={isSpeaking ? 3 : tier === "off" ? 1 : 2.5}
+                filter={isSpeaking ? "url(#speaking-glow)" : undefined}
               />
               <text
                 x={x}
                 y={y + 4}
                 textAnchor="middle"
                 fontSize={10}
-                fill={style.text}
+                fill={isSpeaking ? "#fde68a" : style.text}
                 fontFamily="monospace"
+                fontWeight={isSpeaking ? "bold" : "normal"}
               >
                 {characterId.slice(0, 4).toUpperCase()}
               </text>
             </g>
           );
         })}
+
         {floatingNumbers.map((entry) => {
           const position = positions.find((p) => p.characterId === entry.target);
           if (!position) return null;
@@ -201,37 +201,6 @@ export function TrustGraph() {
             >
               {entry.change >= 0 ? `+${entry.change}` : entry.change}
             </text>
-          );
-        })}
-        {positions.map(({ characterId, x, y }) => {
-          const bubble = speechBubbles[characterId];
-          if (!bubble) return null;
-          const style = TIER_STYLE[characterTier(characterId, state.batches, state.focusedBatchId)];
-          const bubbleWidth = 100;
-          const bubbleHeight = 30;
-          // Clamped rather than always-above: nodes near the top of the
-          // circle would otherwise push the bubble off the viewBox.
-          const bubbleY = Math.max(2, y - style.radius - bubbleHeight - 6);
-          return (
-            <foreignObject
-              key={bubble.id}
-              x={x - bubbleWidth / 2}
-              y={bubbleY}
-              width={bubbleWidth}
-              height={bubbleHeight}
-            >
-              <div
-                className="flex h-full items-center justify-center rounded border px-1.5 text-center font-mono leading-tight"
-                style={{
-                  fontSize: "8px",
-                  color: "#f4f4f5",
-                  backgroundColor: "rgba(9,9,11,0.9)",
-                  borderColor: style.stroke,
-                }}
-              >
-                {bubble.text}
-              </div>
-            </foreignObject>
           );
         })}
       </svg>
